@@ -58,6 +58,7 @@ bool D3DRenderer::Resize() {
     return true;
 }
 void D3DRenderer::Clear() {
+    hasFrame_=false;
     if (!swapChain_ || !Resize()) return;
     const float black[] = {0, 0, 0, 1};
     context_->ClearRenderTargetView(target_.get(), black);
@@ -87,6 +88,21 @@ bool D3DRenderer::Render(ID3D11Texture2D* source, UINT width, UINT height) {
     // buffer flags. No staging resource, Map, readback, or CPU pixel processing.
     D3D11_BOX box{0, 0, 0, width, height, 1};
     context_->CopySubresourceRegion(input_.get(), 0, 0, 0, 0, source, 0, &box);
+    hasFrame_=true;
+    return PresentFrame();
+}
+bool D3DRenderer::Redraw() {
+    if(!hasFrame_ || !IsWindowVisible(hwnd_) || !Resize()) return false;
+    return PresentFrame();
+}
+bool D3DRenderer::PresentFrame() {
+    DrawFrame();
+    HRESULT hr = swapChain_->Present(1, 0);
+    check_hresult(hr);
+    return hr != DXGI_STATUS_OCCLUDED;
+}
+void D3DRenderer::DrawFrame() {
+    const UINT width=inputWidth_,height=inputHeight_;
     const auto output = OutputSize();
     if(SettingsPending()) timer_.Reset();
     cropRegion_=CropRegion(width,height,crop_);
@@ -103,7 +119,4 @@ bool D3DRenderer::Render(ID3D11Texture2D* source, UINT width, UINT height) {
     appliedMode_ = mode_; appliedOutput_ = output;
     appliedCrop_=crop_; appliedSharpen_=sharpen_; appliedEdit_=cropEdit_;
     compositor_.Draw(target_.get(),width_,height_,view,region,inputView_.get(),cropRegion_,output,contentSize_,compare_,split_,cropEdit_);
-    HRESULT hr = swapChain_->Present(1, 0);
-    check_hresult(hr);
-    return hr != DXGI_STATUS_OCCLUDED;
 }

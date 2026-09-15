@@ -12,11 +12,14 @@ class D3DRenderer {
 public:
     void Initialize(HWND preview, bool debug = false);
     bool Render(ID3D11Texture2D* source, UINT width, UINT height);
+    // One user-requested redraw of the retained GPU frame; never a frame loop.
+    bool Redraw();
     void Clear();
     void SetUpscaleMode(UpscaleMode mode) { mode_ = mode; }
     void SetOutputMode(OutputMode mode) { outputMode_ = mode; }
     void SetSharpen(int value) { sharpen_=std::clamp(value,0,100); }
     int Sharpen() const { return sharpen_; }
+    bool RCASDebugBoost() const { return rcas_.DebugBoost(); }
     void SetCrop(CropSettings crop) { crop_=crop; }
     CropSettings Crop() const { return crop_; }
     SourceRegion CroppedRegion() const { return cropRegion_; }
@@ -40,7 +43,11 @@ public:
     UINT Height() const { return height_; }
     const std::wstring& AdapterName() const { return adapterName_; }
 private:
+    friend struct RendererTestAccess; // Test-only readback BEFORE flip-discard Present.
     bool Resize();
+    void DrawFrame();
+    bool PresentFrame();
+    bool hasFrame_{};
     HWND hwnd_{};
     UINT width_{}, height_{}, inputWidth_{}, inputHeight_{};
     std::wstring adapterName_;

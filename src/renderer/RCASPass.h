@@ -7,6 +7,7 @@ public:
     ID3D11ShaderResourceView* Process(ID3D11ShaderResourceView* source, SourceRegion region, int strength);
     SourceRegion ResultRegion() const { return result_; }
     uint64_t Allocations() const { return allocations_; }
+    bool DebugBoost() const { return debugBoost_; }
 private:
     winrt::com_ptr<ID3D11Device> device_;
     winrt::com_ptr<ID3D11DeviceContext> context_;
@@ -20,4 +21,5 @@ private:
     DXGI_FORMAT format_{};
     UINT width_{},height_{};
     uint64_t allocations_{};
+    bool debugBoost_{};
 };

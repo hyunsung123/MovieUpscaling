@@ -7,9 +7,19 @@
 #include <commctrl.h>
 #include <fstream>
 #include <filesystem>
+#include "DetailFixture.h"
 namespace {
 bool qualitySource=false;
+std::vector<std::array<unsigned char,4>> pausedFixture;
 LRESULT CALLBACK SourceProc(HWND hwnd,UINT msg,WPARAM w,LPARAM l) {
+    if(msg==WM_PAINT && !pausedFixture.empty()) {
+        PAINTSTRUCT ps{}; auto dc=BeginPaint(hwnd,&ps);
+        BITMAPINFO info{}; info.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);
+        info.bmiHeader.biWidth=1280; info.bmiHeader.biHeight=-720;
+        info.bmiHeader.biPlanes=1; info.bmiHeader.biBitCount=32;
+        SetDIBitsToDevice(dc,0,0,1280,720,0,0,0,720,pausedFixture.data(),&info,DIB_RGB_COLORS);
+        EndPaint(hwnd,&ps); return 0;
+    }
     if(msg==WM_PAINT && qualitySource) {
         PAINTSTRUCT ps{}; auto dc=BeginPaint(hwnd,&ps); RECT r{}; GetClientRect(hwnd,&r);
         auto brush=CreateSolidBrush(RGB(38,42,48)); FillRect(dc,&r,brush); DeleteObject(brush);
@@ -70,7 +80,7 @@ std::wstring Generation(std::wstring const& text) {
     auto begin=text.find(L"Capture generation:"); Require(begin!=std::wstring::npos,"Missing capture generation");
     return text.substr(begin,text.find(L"\r\n",begin)-begin);
 }
-void Screenshot(HWND window) {
+void Screenshot(HWND window,const char* name="app-phase5.bmp") {
     std::filesystem::create_directories("validation"); RECT r{}; GetWindowRect(window,&r); int w=r.right-r.left,h=r.bottom-r.top;
     auto dc=GetWindowDC(window),memory=CreateCompatibleDC(dc);
     BITMAPINFO info{}; info.bmiHeader.biSize=sizeof(BITMAPINFOHEADER); info.bmiHeader.biWidth=w; info.bmiHeader.biHeight=-h;
@@ -78,7 +88,7 @@ void Screenshot(HWND window) {
     void* bits{}; auto bitmap=CreateDIBSection(dc,&info,DIB_RGB_COLORS,&bits,nullptr,0); auto old=SelectObject(memory,bitmap);
     Require(PrintWindow(window,memory,2)!=0,"UI screenshot failed");
     BITMAPFILEHEADER header{}; header.bfType=0x4d42; header.bfOffBits=sizeof(header)+sizeof(BITMAPINFOHEADER); header.bfSize=header.bfOffBits+w*h*4;
-    std::ofstream file("validation/app-phase5.bmp",std::ios::binary); file.write(reinterpret_cast<char*>(&header),sizeof(header));
+    std::ofstream file(std::string("validation/")+name,std::ios::binary); file.write(reinterpret_cast<char*>(&header),sizeof(header));
     file.write(reinterpret_cast<char*>(&info.bmiHeader),sizeof(info.bmiHeader)); file.write(static_cast<char*>(bits),w*h*4);
     SelectObject(memory,old); DeleteObject(bitmap); DeleteDC(memory); ReleaseDC(window,dc);
 }
@@ -87,14 +97,19 @@ int wmain(int argc, wchar_t** argv) {
     if (argc < 2) return 1;
     bool phase4=argc==3 && std::wstring(argv[2])==L"--phase4";
     bool phase5=argc==3 && std::wstring(argv[2])==L"--phase5";
+    bool paused=argc==3 && std::wstring(argv[2])==L"--rcas";
+    if(paused) {
+        SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        pausedFixture=DetailFixture();
+    }
     qualitySource=phase5;
     PROCESS_INFORMATION process{}; HWND source{};
     try {
         WNDCLASSW cls{}; cls.lpfnWndProc = SourceProc; cls.hInstance = GetModuleHandleW(nullptr);
         cls.hbrBackground = static_cast<HBRUSH>(GetStockObject(WHITE_BRUSH)); cls.lpszClassName = L"AppSmokeSource";
         RegisterClassW(&cls);
-        source = CreateWindowW(cls.lpszClassName, L"Unique app smoke source", ((phase4||phase5) ? WS_POPUP : WS_OVERLAPPEDWINDOW) | WS_VISIBLE,
-            20, 20, (phase4||phase5) ? 1280 : 400, (phase4||phase5) ? 720 : 300, nullptr, nullptr, cls.hInstance, nullptr);
+        source = CreateWindowW(cls.lpszClassName, L"Unique app smoke source", ((phase4||phase5||paused) ? WS_POPUP : WS_OVERLAPPEDWINDOW) | WS_VISIBLE,
+            20, 20, (phase4||phase5||paused) ? 1280 : 400, (phase4||phase5||paused) ? 720 : 300, nullptr, nullptr, cls.hInstance, nullptr);
         Require(source != nullptr, "Source creation failed");
         std::wstring command = L"\"" + std::wstring(argv[1]) + L"\"";
         STARTUPINFOW startup{sizeof(startup)};
@@ -123,6 +138,37 @@ int wmain(int argc, wchar_t** argv) {
         Require(!IsWindowEnabled(GetDlgItem(app.main, 102)) && IsWindowEnabled(GetDlgItem(app.main, 103)), "Capture did not start");
         Require(!status.empty() && !status.starts_with(L"Input: 0 x 0"), "No captured frame reached app status");
         Require(status.find(L"@ 0.0 render fps") == std::wstring::npos, "No rendered frames");
+        if(paused) {
+            Select(app.main,107,2);
+            SendMessageW(app.main,WM_COMMAND,104,0);
+            SetWindowPos(app.preview,HWND_TOP,0,0,2560,1440,SWP_NOACTIVATE);
+            Frames(source,10); Pump(300);
+            SendMessageW(app.main,WM_TIMER,1,0); auto generation=Generation(Status(app.main));
+            // No source invalidation from here. Exercise local controls on the
+            // same detailed paused frame, including immediately updated status.
+            for(int strength:{0,25,100}) {
+                Slider(app.main,108,strength); Pump(100);
+                auto s=Status(app.main);
+                Require(s.find(L"Preview: 2560 x 1440")!=std::wstring::npos,"Paused Preview is not 1:1");
+                Require(s.find(L"Output: 2560 x 1440")!=std::wstring::npos,"Paused output is not 1440p");
+                Require(s.find(L"pending") == std::wstring::npos,"Paused sharpening was not applied immediately");
+                Require(s.find(strength?L"RCAS: Active":L"RCAS: Bypassed")!=std::wstring::npos,"RCAS active/bypass status wrong");
+                Require(Generation(s)==generation,"Paused RCAS recreated capture session");
+                // Production Preview excludes capture, so PrintWindow would
+                // save black. Pixel validation uses the renderer test's owned
+                // swapchain before Present, without changing capture exclusion.
+            }
+            SendMessageW(app.preview,WM_KEYDOWN,VK_F3,0);
+            Require(Status(app.main).find(L"RCAS: Bypassed")!=std::wstring::npos,"Paused F3 did not bypass immediately");
+            SendMessageW(app.preview,WM_KEYDOWN,VK_F3,0);
+            auto restored=Status(app.main);
+            Require(restored.find(L"Sharpen: RCAS 100")!=std::wstring::npos && restored.find(L"RCAS: Active")!=std::wstring::npos,"Paused F3 did not restore immediately");
+            wchar_t boost[2]{}; bool debug=GetEnvironmentVariableW(L"MOVIEUPSCALING_DEBUG_RCAS",boost,2)==1 && boost[0]==L'1';
+            Require((restored.find(L"DEBUG BOOST")!=std::wstring::npos)==debug,"Debug boost status mismatch");
+            Screenshot(app.main,debug?"app-rcas-debug-status.bmp":"app-rcas-status.bmp");
+            SendMessageW(app.preview,WM_KEYDOWN,VK_ESCAPE,0);
+            std::cout<<"PASS actual app: paused detailed 720p -> 1440p, 1:1 Preview, 0/25/100, F3 immediate bypass/restore, same WGC session\n";
+        }
         if(phase5) {
             auto generation=Generation(status);
             auto state=[&]() {

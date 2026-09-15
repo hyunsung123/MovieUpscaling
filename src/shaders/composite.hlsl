@@ -13,6 +13,9 @@ float3 SampleRegion(Texture2D<float4> image, float2 uv, float4 region, float2 si
     float2 pixel=region.xy+clamp(uv*region.zw,.5,region.zw-.5);
     return image.SampleLevel(linearClamp,pixel/size,0).rgb;
 }
+// Presentation uses linear sampling: a 4K processed texture in a 1440p Preview
+// naturally softens RCAS detail. Compare sharpening with content and Preview
+// at equal dimensions; do not mistake final downsampling for an RCAS bypass.
 float4 PSMain(Vertex v) : SV_Target {
     float2 location=v.position.xy;
     float2 uv=(location-contentRect.xy)/contentRect.zw;

@@ -1,8 +1,11 @@
 #include "RCASPass.h"
 #include "ShaderCompiler.h"
 #include "ShaderSource.h"
+#include <cmath>
 using namespace winrt;
 void RCASPass::Initialize(ID3D11Device* device,DXGI_FORMAT format) {
+    wchar_t debug[2]{};
+    debugBoost_=GetEnvironmentVariableW(L"MOVIEUPSCALING_DEBUG_RCAS",debug,2)==1 && debug[0]==L'1';
     device_.copy_from(device); device->GetImmediateContext(context_.put()); format_=format;
     auto vs=CompileShader(RcasShader,"VSMain","vs_5_0"), ps=CompileShader(RcasShader,"PSMain","ps_5_0");
     check_hresult(device->CreateVertexShader(vs->GetBufferPointer(),vs->GetBufferSize(),nullptr,vertex_.put()));
@@ -27,7 +30,11 @@ ID3D11ShaderResourceView* RCASPass::Process(ID3D11ShaderResourceView* source,Sou
         width_=region.width; height_=region.height; ++allocations_;
     }
     const float dimensions[]={float(region.width),float(region.height),float(region.width),float(region.height),float(region.x),float(region.y),0,0};
-    const float sharp[]={.85f*strength/100.0f,0,0,0};
+    // Reach AMD's full-strength RCAS at 100. The nonlinear curve gives the
+    // everyday 20-40 range useful gain; retain some noise attenuation even at
+    // the deliberately aggressive end to constrain isolated thin-line ringing.
+    const float t=strength/100.f;
+    const float sharp[]={std::pow(t,.65f)*(debugBoost_?2.f:1.f),.5f-.15f*t,debugBoost_?-.23f:-.1875f,0};
     context_->UpdateSubresource(dimensions_.get(),0,nullptr,dimensions,0,0);
     context_->UpdateSubresource(strength_.get(),0,nullptr,sharp,0,0);
     context_->RSSetState(nullptr);

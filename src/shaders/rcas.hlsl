@@ -1,7 +1,8 @@
 // AMD FidelityFX FSR 1 RCAS FP32 adaptation. Copyright (c) 2021 AMD.
 // MIT permission in THIRD_PARTY_NOTICES.md. Five-tap adaptive RCAS, NOT unsharp mask.
-// Dimensions/common declarations are prepended. Default enable AMD noise attenuation.
-cbuffer Sharpen : register(b1) { float sharpness; float3 padding; };
+// Dimensions/common declarations are prepended. AMD's optional noise attenuation
+// decreases at high strength. Debug boost alone extends the reference gain.
+cbuffer Sharpen : register(b1) { float sharpness; float noiseAttenuation; float lobeFloor; float padding; };
 float4 PSMain(Vertex v) : SV_Target {
     int2 p = int2(v.position.xy);
     float3 b=LoadClamped(p+int2(0,-1)), d=LoadClamped(p+int2(-1,0));
@@ -16,9 +17,12 @@ float4 PSMain(Vertex v) : SV_Target {
     float fL=f.g+.5*(f.r+f.b), hL=h.g+.5*(h.r+h.b);
     float range=max(max(max(bL,dL),max(fL,hL)),eL)-min(min(min(bL,dL),min(fL,hL)),eL);
     float noise=saturate(abs(.25*(bL+dL+fL+hL)-eL)/max(range,1e-6));
-    lobe *= 1-.5*noise;
+    lobe *= 1-noiseAttenuation*noise;
+    // Diagnostic 2x gain must never approach the -0.25 singularity. Normal
+    // strength retains the reference -0.1875 floor and adaptive RGB limiters.
+    lobe=max(lobe,lobeFloor);
     float3 result=(e+lobe*(b+d+f+h))/(1+4*lobe);
-    // Practical video guard: permit at most 2% overshoot of the local five-tap
-    // envelope, in addition to RCAS's own limiters. Helps subtitles/compression.
-    return float4(saturate(clamp(result,min(mn,e)-.02,max(mx,e)+.02)),1);
+    // Keep the SDR range, without a second local-envelope clamp that erases
+    // the edge contrast RCAS just reconstructed.
+    return float4(saturate(result),1);
 }

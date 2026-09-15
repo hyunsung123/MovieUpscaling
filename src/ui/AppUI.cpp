@@ -263,12 +263,14 @@ void AppUI::OnFrame() {
     frame.Close();
     capture_.Resize(size); // Release outstanding frame before pool recreation.
 }
-void AppUI::Status() {
+void AppUI::Status(bool sampleCounters) {
     auto now = std::chrono::steady_clock::now();
     double seconds = std::chrono::duration<double>(now - statsTime_).count();
     if (seconds <= 0) return;
-    captureFps_ = captured_ / seconds; renderFps_ = rendered_ / seconds;
-    captured_ = rendered_ = 0; statsTime_ = now;
+    if(sampleCounters) {
+        captureFps_ = captured_ / seconds; renderFps_ = rendered_ / seconds;
+        captured_ = rendered_ = 0; statsTime_ = now;
+    }
     std::wostringstream text;
     auto output = renderer_.OutputSize();
     const bool pending = renderer_.SettingsPending();
@@ -285,6 +287,10 @@ void AppUI::Status() {
     text << std::setprecision(2) << L" | Scale: ";
     if (pending) text << L"pending"; else text << renderer_.Scale() << L"x";
     text << L"\r\nSharpen: RCAS " << renderer_.Sharpen();
+    text << L"\r\nRCAS: ";
+    if(renderer_.CropEdit() || renderer_.Sharpen()==0) text << L"Bypassed";
+    else if(pending) text << L"Pending next frame";
+    else text << (renderer_.RCASDebugBoost()?L"Active (DEBUG BOOST)":L"Active");
     if(renderer_.CropEdit()) text << L"\r\nCrop edit: full frame / processing suspended";
     auto timing=renderer_.PostProcessTime();
     if(pending || renderer_.CropEdit() || !timing) text << L"\r\nUpscale GPU: N/A | RCAS GPU: N/A\r\nPost-process total: N/A";
@@ -322,6 +328,7 @@ void AppUI::SyncVideoControls() {
     SetWindowTextW(splitValue_,(std::to_wstring(int(std::lround(renderer_.Split()*100)))+L"%").c_str());
 }
 void AppUI::UpdateVideoSettings() {
+    const auto previousSharpen=renderer_.Sharpen();
     renderer_.SetSharpen(static_cast<int>(SendMessageW(sharpenSlider_,TBM_GETPOS,0,0)));
     if(renderer_.Sharpen()>0) lastSharpen_=renderer_.Sharpen();
     auto crop=renderer_.Crop();
@@ -329,6 +336,14 @@ void AppUI::UpdateVideoSettings() {
     crop.right=static_cast<int>(SendMessageW(cropSliders_[2],TBM_GETPOS,0,0)); crop.bottom=static_cast<int>(SendMessageW(cropSliders_[3],TBM_GETPOS,0,0));
     renderer_.SetCrop(crop); renderer_.SetSplit(float(SendMessageW(splitSlider_,TBM_GETPOS,0,0))/100);
     SyncVideoControls();
+    if(previousSharpen!=renderer_.Sharpen()) RedrawSharpen();
+}
+void AppUI::RedrawSharpen() {
+    if(!capture_.Running()) return;
+    auto begin=std::chrono::steady_clock::now();
+    if(renderer_.Redraw()) ++rendered_;
+    submitMs_=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-begin).count();
+    Status(false); // Update RCAS state immediately, keep the 1-second FPS sample.
 }
 bool AppUI::Hotkey(WPARAM key) {
     if(key==VK_F1) renderer_.SetCompare(renderer_.Compare()==CompareMode::Off?lastCompare_:CompareMode::Off);
@@ -338,7 +353,9 @@ bool AppUI::Hotkey(WPARAM key) {
         if(renderer_.Sharpen()) { lastSharpen_=renderer_.Sharpen(); renderer_.SetSharpen(0); }
         else renderer_.SetSharpen(lastSharpen_);
     } else return false;
-    SyncVideoControls(); return true;
+    SyncVideoControls();
+    if(key==VK_F3) RedrawSharpen();
+    return true;
 }
 void AppUI::Fullscreen() {
     ShowWindow(preview_, SW_SHOW);

@@ -14,9 +14,10 @@ private:
     void Stop(const wchar_t* reason);
     void OnFrame();
     void Fullscreen();
-    void Status();
+    void Status(bool sampleCounters=true);
     void SyncVideoControls();
     void UpdateVideoSettings();
+    void RedrawSharpen();
     bool Hotkey(WPARAM key);
     HWND main_{}, preview_{}, sources_{}, status_{}, start_{}, stop_{}, upscale_{}, output_{};
     bool fullscreen_{};
