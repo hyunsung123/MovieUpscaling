@@ -1,17 +1,17 @@
 #include "D3DRenderer.h"
 #include "utils/GPUInfo.h"
-#include "ShaderSource.h"
-#include "ShaderCompiler.h"
 #include <algorithm>
 #include <cmath>
 using namespace winrt;
-void D3DRenderer::Initialize(HWND preview) {
+void D3DRenderer::Initialize(HWND preview,bool debug) {
     hwnd_ = preview;
     D3D_FEATURE_LEVEL level;
     const D3D_FEATURE_LEVEL levels[] = { D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0 };
-    check_hresult(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
-        D3D11_CREATE_DEVICE_BGRA_SUPPORT, levels, ARRAYSIZE(levels), D3D11_SDK_VERSION,
-        device_.put(), &level, context_.put()));
+    auto create=[&](UINT flags) { return D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_HARDWARE,nullptr,
+        flags,levels,ARRAYSIZE(levels),D3D11_SDK_VERSION,device_.put(),&level,context_.put()); };
+    auto hr=create(D3D11_CREATE_DEVICE_BGRA_SUPPORT | (debug?D3D11_CREATE_DEVICE_DEBUG:0));
+    if(hr==DXGI_ERROR_SDK_COMPONENT_MISSING && debug) hr=create(D3D11_CREATE_DEVICE_BGRA_SUPPORT);
+    check_hresult(hr);
     adapterName_ = GPUName(device_.get());
     auto dxgi = device_.as<IDXGIDevice1>();
     check_hresult(dxgi->SetMaximumFrameLatency(1));
@@ -27,19 +27,8 @@ void D3DRenderer::Initialize(HWND preview) {
     desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
     check_hresult(factory->CreateSwapChainForHwnd(device_.get(), hwnd_, &desc, nullptr, nullptr, swapChain_.put()));
     check_hresult(factory->MakeWindowAssociation(hwnd_, DXGI_MWA_NO_ALT_ENTER));
-    auto vs = CompileShader(PresentShader, "VSMain", "vs_5_0"), ps = CompileShader(PresentShader, "PSMain", "ps_5_0");
-    check_hresult(device_->CreateVertexShader(vs->GetBufferPointer(), vs->GetBufferSize(), nullptr, vertex_.put()));
-    check_hresult(device_->CreatePixelShader(ps->GetBufferPointer(), ps->GetBufferSize(), nullptr, pixel_.put()));
-    D3D11_SAMPLER_DESC samp{};
-    samp.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
-    samp.AddressU = samp.AddressV = samp.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
-    samp.MaxLOD = D3D11_FLOAT32_MAX;
-    check_hresult(device_->CreateSamplerState(&samp, sampler_.put()));
-    D3D11_RASTERIZER_DESC raster{};
-    raster.FillMode = D3D11_FILL_SOLID; raster.CullMode = D3D11_CULL_NONE;
-    raster.DepthClipEnable = TRUE; raster.ScissorEnable = TRUE;
-    check_hresult(device_->CreateRasterizerState(&raster, scissor_.put()));
     upscaler_.Initialize(device_.get());
+    rcas_.Initialize(device_.get()); compositor_.Initialize(device_.get()); timer_.Initialize(device_.get());
     Clear();
 }
 UpscaleSize D3DRenderer::OutputSize() const {
@@ -82,6 +71,7 @@ bool D3DRenderer::Render(ID3D11Texture2D* source, UINT width, UINT height) {
     // Skip this transitional frame; the caller recreates the frame pool afterward.
     if (!width || !height || width > sourceDesc.Width || height > sourceDesc.Height) return false;
     if (width != inputWidth_ || height != inputHeight_) {
+        timer_.Reset();
         inputView_ = nullptr; input_ = nullptr;
         D3D11_TEXTURE2D_DESC desc{};
         desc.Width = width; desc.Height = height; desc.MipLevels = desc.ArraySize = 1;
@@ -98,34 +88,21 @@ bool D3DRenderer::Render(ID3D11Texture2D* source, UINT width, UINT height) {
     D3D11_BOX box{0, 0, 0, width, height, 1};
     context_->CopySubresourceRegion(input_.get(), 0, 0, 0, 0, source, 0, &box);
     const auto output = OutputSize();
-    contentSize_ = FitOutput(width, height, output.width, output.height, mode_);
-    auto view = upscaler_.Process(inputView_.get(), width, height, contentSize_.width, contentSize_.height, mode_);
+    if(SettingsPending()) timer_.Reset();
+    cropRegion_=CropRegion(width,height,crop_);
+    contentSize_ = FitOutput(cropRegion_.width,cropRegion_.height,output.width,output.height,mode_);
+    ID3D11ShaderResourceView* view=inputView_.get(); SourceRegion region{0,0,width,height};
+    if(!cropEdit_) {
+        timer_.Begin();
+        view=upscaler_.Process(inputView_.get(),width,height,contentSize_.width,contentSize_.height,mode_,cropRegion_);
+        timer_.Split();
+        view=rcas_.Process(view,upscaler_.ResultRegion(),sharpen_);
+        timer_.End();
+        region=rcas_.ResultRegion();
+    }
     appliedMode_ = mode_; appliedOutput_ = output;
-    const float black[] = {0, 0, 0, 1};
-    context_->ClearRenderTargetView(target_.get(), black);
-    // Present the selected output canvas inside the window. Content-only
-    // intermediate textures avoid shading black bars. Native stays 1:1 in the
-    // output canvas; scissoring center-crops only if the source exceeds it.
-    const float scale = std::min(float(width_) / output.width, float(height_) / output.height);
-    const float canvasX = (width_ - output.width * scale) / 2, canvasY = (height_ - output.height * scale) / 2;
-    D3D11_RECT clip{static_cast<LONG>(std::lround(canvasX)), static_cast<LONG>(std::lround(canvasY)),
-        static_cast<LONG>(std::lround(canvasX + output.width * scale)), static_cast<LONG>(std::lround(canvasY + output.height * scale))};
-    context_->RSSetState(scissor_.get()); context_->RSSetScissorRects(1, &clip);
-    D3D11_VIEWPORT viewport{(width_ - contentSize_.width * scale) / 2, (height_ - contentSize_.height * scale) / 2,
-        contentSize_.width * scale, contentSize_.height * scale, 0, 1};
-    context_->RSSetViewports(1, &viewport);
-    auto target = target_.get();
-    context_->OMSetRenderTargets(1, &target, nullptr);
-    context_->IASetInputLayout(nullptr);
-    context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    context_->VSSetShader(vertex_.get(), nullptr, 0);
-    context_->PSSetShader(pixel_.get(), nullptr, 0);
-    auto sampler = sampler_.get();
-    context_->PSSetShaderResources(0, 1, &view);
-    context_->PSSetSamplers(0, 1, &sampler);
-    context_->Draw(3, 0);
-    ID3D11ShaderResourceView* none = nullptr;
-    context_->PSSetShaderResources(0, 1, &none);
+    appliedCrop_=crop_; appliedSharpen_=sharpen_; appliedEdit_=cropEdit_;
+    compositor_.Draw(target_.get(),width_,height_,view,region,inputView_.get(),cropRegion_,output,contentSize_,compare_,split_,cropEdit_);
     HRESULT hr = swapChain_->Present(1, 0);
     check_hresult(hr);
     return hr != DXGI_STATUS_OCCLUDED;

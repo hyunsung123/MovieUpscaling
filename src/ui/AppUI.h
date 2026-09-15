@@ -15,8 +15,16 @@ private:
     void OnFrame();
     void Fullscreen();
     void Status();
+    void SyncVideoControls();
+    void UpdateVideoSettings();
+    bool Hotkey(WPARAM key);
     HWND main_{}, preview_{}, sources_{}, status_{}, start_{}, stop_{}, upscale_{}, output_{};
     bool fullscreen_{};
+    HWND sharpenSlider_{},sharpenValue_{},cropMode_{},cropEditButton_{},compareMode_{},splitSlider_{},splitValue_{};
+    std::array<HWND,4> cropSliders_{},cropLabels_{};
+    int lastSharpen_{25};
+    CompareMode lastCompare_{CompareMode::Vertical};
+    bool dividerDrag_{};
     WINDOWPLACEMENT placement_{sizeof(WINDOWPLACEMENT)};
     std::vector<WindowEntry> windows_;
     D3DRenderer renderer_;

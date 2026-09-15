@@ -1,6 +1,9 @@
 Texture2D<float4> sourceTexture : register(t0);
 SamplerState linearClamp : register(s0);
-cbuffer Dimensions : register(b0) { float2 inputSize; float2 outputSize; };
+cbuffer Dimensions : register(b0) {
+    float2 inputSize; float2 outputSize;
+    float2 sourceOrigin; float2 textureSize;
+};
 struct Vertex { float4 position : SV_Position; float2 uv : TEXCOORD0; };
 Vertex VSMain(uint id : SV_VertexID) {
     Vertex v;
@@ -9,5 +12,5 @@ Vertex VSMain(uint id : SV_VertexID) {
     return v;
 }
 float3 LoadClamped(int2 p) {
-    return sourceTexture.Load(int3(clamp(p, int2(0, 0), int2(inputSize) - 1), 0)).rgb;
+    return sourceTexture.Load(int3(int2(sourceOrigin) + clamp(p, int2(0, 0), int2(inputSize) - 1), 0)).rgb;
 }

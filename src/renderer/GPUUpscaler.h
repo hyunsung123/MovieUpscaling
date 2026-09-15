@@ -3,6 +3,7 @@
 #include <winrt/base.h>
 #include <array>
 #include <optional>
+#include "VideoSettings.h"
 enum class UpscaleMode { Native, Bilinear, Bicubic, Lanczos, Easu };
 enum class OutputMode { Auto, FullHD, QHD, UHD };
 const wchar_t* UpscaleName(UpscaleMode mode);
@@ -17,7 +18,8 @@ class GPUUpscaler {
 public:
     void Initialize(ID3D11Device* device);
     ID3D11ShaderResourceView* Process(ID3D11ShaderResourceView* source, UINT inputWidth, UINT inputHeight,
-        UINT outputWidth, UINT outputHeight, UpscaleMode mode);
+        UINT outputWidth, UINT outputHeight, UpscaleMode mode, SourceRegion region = {});
+    SourceRegion ResultRegion() const { return resultRegion_; }
     std::optional<double> GPUTimeMs() const { return gpuMs_; }
     uint64_t TimingSamples() const { return timingSamples_; }
     uint64_t Allocations() const { return allocations_; }
@@ -45,4 +47,6 @@ private:
     bool bypassed_{true};
     uint64_t generation_{}, allocations_{}, timingSamples_{};
     std::optional<double> gpuMs_;
+    SourceRegion sourceRegion_{}, resultRegion_{};
+    UINT textureWidth_{}, textureHeight_{};
 };

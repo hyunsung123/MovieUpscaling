@@ -25,7 +25,7 @@ void GPUUpscaler::Initialize(ID3D11Device* device) {
     device_.copy_from(device); device_->GetImmediateContext(context_.put());
     auto vs = CompileShader(PresentShader, "VSMain", "vs_5_0");
     check_hresult(device_->CreateVertexShader(vs->GetBufferPointer(), vs->GetBufferSize(), nullptr, vertex_.put()));
-    const char* sources[] = {PresentShader, BicubicShader, LanczosShader, EasuShader};
+    const char* sources[] = {BilinearShader, BicubicShader, LanczosShader, EasuShader};
     for (size_t i = 0; i < shaders_.size(); ++i) {
         auto ps = CompileShader(sources[i], "PSMain", "ps_5_0");
         check_hresult(device_->CreatePixelShader(ps->GetBufferPointer(), ps->GetBufferSize(), nullptr, shaders_[i].put()));
@@ -35,7 +35,7 @@ void GPUUpscaler::Initialize(ID3D11Device* device) {
     sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
     sampler.MaxLOD = D3D11_FLOAT32_MAX;
     check_hresult(device_->CreateSamplerState(&sampler, sampler_.put()));
-    D3D11_BUFFER_DESC buffer{}; buffer.ByteWidth = 16; buffer.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    D3D11_BUFFER_DESC buffer{}; buffer.ByteWidth = 32; buffer.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
     check_hresult(device_->CreateBuffer(&buffer, nullptr, constants_.put()));
     for (auto& q : queries_) {
         D3D11_QUERY_DESC desc{D3D11_QUERY_TIMESTAMP_DISJOINT, 0};
@@ -62,19 +62,26 @@ void GPUUpscaler::PollTiming() {
         }
     }
 }
-ID3D11ShaderResourceView* GPUUpscaler::Process(ID3D11ShaderResourceView* source, UINT iw, UINT ih, UINT ow, UINT oh, UpscaleMode mode) {
+ID3D11ShaderResourceView* GPUUpscaler::Process(ID3D11ShaderResourceView* source, UINT iw, UINT ih, UINT ow, UINT oh, UpscaleMode mode, SourceRegion region) {
     if (!iw || !ih || !ow || !oh) throw hresult_invalid_argument(L"Invalid upscale dimensions.");
+    const UINT tw=iw, th=ih;
+    if(!region.width || !region.height) region={0,0,iw,ih};
+    if(region.x>=iw || region.y>=ih || region.width>iw-region.x || region.height>ih-region.y)
+        throw hresult_invalid_argument(L"Crop exceeds source texture.");
+    iw=region.width; ih=region.height;
     // EASU is an upsampler. Explicitly expose bilinear fallback for downscaling.
     auto effective = mode == UpscaleMode::Easu && (ow < iw || oh < ih) ? UpscaleMode::Bilinear : mode;
-    if (inputWidth_ != iw || inputHeight_ != ih || constantWidth_ != ow || constantHeight_ != oh || effective_ != effective) {
+    if (inputWidth_ != iw || inputHeight_ != ih || constantWidth_ != ow || constantHeight_ != oh || effective_ != effective || sourceRegion_!=region || textureWidth_!=tw || textureHeight_!=th) {
         ++generation_; gpuMs_.reset(); timingSamples_ = 0;
         effective_ = effective;
-        const float constants[] = {float(iw), float(ih), float(ow), float(oh)};
+        const float constants[] = {float(iw), float(ih), float(ow), float(oh),float(region.x),float(region.y),float(tw),float(th)};
         context_->UpdateSubresource(constants_.get(), 0, nullptr, constants, 0, 0);
         inputWidth_ = iw; inputHeight_ = ih; constantWidth_ = ow; constantHeight_ = oh;
+        sourceRegion_=region; textureWidth_=tw; textureHeight_=th;
     }
     PollTiming();
     bypassed_ = mode == UpscaleMode::Native || (iw == ow && ih == oh);
+    resultRegion_=bypassed_ ? region : SourceRegion{0,0,ow,oh};
     if (bypassed_) { gpuMs_.reset(); return source; }
     if (width_ != ow || height_ != oh) {
         context_->OMSetRenderTargets(0, nullptr, nullptr);

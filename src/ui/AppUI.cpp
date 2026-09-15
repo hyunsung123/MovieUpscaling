@@ -2,10 +2,13 @@
 #include <windows.graphics.directx.direct3d11.interop.h>
 #include <sstream>
 #include <iomanip>
+#include <commctrl.h>
+#include <windowsx.h>
 using namespace winrt;
 namespace {
 constexpr int Source = 100, RefreshList = 101, StartCapture = 102, StopCapture = 103, ToggleFullscreen = 104, Topmost = 105;
 constexpr int Upscale = 106, Output = 107;
+constexpr int Sharpen=108, CropMode=109, EditCrop=110, Compare=111, Split=112, CropLeft=113;
 HWND Control(HWND parent, const wchar_t* cls, const wchar_t* text, DWORD style, int x, int y, int w, int h, int id) {
     HWND hwnd = CreateWindowExW(0, cls, text, WS_CHILD | WS_VISIBLE | style, x, y, w, h, parent,
         reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), GetModuleHandleW(nullptr), nullptr);
@@ -15,6 +18,7 @@ HWND Control(HWND parent, const wchar_t* cls, const wchar_t* text, DWORD style, 
 }
 }
 int AppUI::Run(HINSTANCE instance, int show) {
+    INITCOMMONCONTROLSEX controls{sizeof(controls),ICC_BAR_CLASSES}; InitCommonControlsEx(&controls);
     WNDCLASSEXW cls{sizeof(cls)};
     cls.style = CS_DBLCLKS;
     cls.lpfnWndProc = WindowProc;
@@ -25,7 +29,7 @@ int AppUI::Run(HINSTANCE instance, int show) {
     if (!RegisterClassExW(&cls)) throw_last_error();
     main_ = CreateWindowExW(0, cls.lpszClassName, L"Window GPU Preview - GPU Upscaling",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, CW_USEDEFAULT, CW_USEDEFAULT,
-        690, 540, nullptr, nullptr, instance, this);
+        740, 870, nullptr, nullptr, instance, this);
     if (!main_) throw_last_error();
     preview_ = CreateWindowExW(0, cls.lpszClassName, L"GPU Preview - double click: fullscreen / Esc: windowed",
         WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 960, 600, nullptr, nullptr, instance, this);
@@ -48,14 +52,40 @@ int AppUI::Run(HINSTANCE instance, int show) {
     stop_ = Control(main_, L"BUTTON", L"Stop", WS_TABSTOP, 130, 166, 100, 32, StopCapture);
     Control(main_, L"BUTTON", L"Fullscreen", WS_TABSTOP, 240, 166, 110, 32, ToggleFullscreen);
     Control(main_, L"BUTTON", L"Always on top", BS_AUTOCHECKBOX | WS_TABSTOP, 370, 166, 160, 32, Topmost);
-    status_ = Control(main_, L"STATIC", L"", 0, 20, 220, 645, 255, 0);
-    renderer_.Initialize(preview_);
+    Control(main_,L"STATIC",L"Sharpen (F3)",0,20,215,130,22,0);
+    sharpenSlider_=Control(main_,TRACKBAR_CLASSW,L"",TBS_NOTICKS|WS_TABSTOP,150,211,390,30,Sharpen);
+    SendMessageW(sharpenSlider_,TBM_SETRANGE,TRUE,MAKELPARAM(0,100));
+    sharpenValue_=Control(main_,L"STATIC",L"25",0,560,215,90,24,0);
+    Control(main_,L"STATIC",L"Crop",0,20,258,60,24,0);
+    cropMode_=Control(main_,L"COMBOBOX",L"",CBS_DROPDOWNLIST|WS_TABSTOP,80,254,150,120,CropMode);
+    for(auto text:{L"Off",L"Manual"}) SendMessageW(cropMode_,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(text));
+    cropEditButton_=Control(main_,L"BUTTON",L"Edit Crop (F2)",WS_TABSTOP,250,252,155,30,EditCrop);
+    const wchar_t* labels[]={L"Left",L"Top",L"Right",L"Bottom"};
+    for(int i=0;i<4;++i) {
+        cropLabels_[i]=Control(main_,L"STATIC",labels[i],0,20+i*165,295,145,22,0);
+        cropSliders_[i]=Control(main_,TRACKBAR_CLASSW,L"",TBS_NOTICKS|WS_TABSTOP,15+i*165,320,150,28,CropLeft+i);
+        SendMessageW(cropSliders_[i],TBM_SETRANGE,TRUE,MAKELPARAM(0,45));
+    }
+    Control(main_,L"STATIC",L"Compare (F1)",0,20,365,125,22,0);
+    compareMode_=Control(main_,L"COMBOBOX",L"",CBS_DROPDOWNLIST|WS_TABSTOP,150,361,195,150,Compare);
+    for(auto text:{L"Off",L"Split Vertical",L"Split Horizontal"}) SendMessageW(compareMode_,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(text));
+    Control(main_,L"STATIC",L"Split",0,365,365,45,22,0);
+    splitSlider_=Control(main_,TRACKBAR_CLASSW,L"",TBS_NOTICKS|WS_TABSTOP,415,359,180,30,Split);
+    SendMessageW(splitSlider_,TBM_SETRANGE,TRUE,MAKELPARAM(0,100));
+    splitValue_=Control(main_,L"STATIC",L"50%",0,610,365,70,22,0);
+    status_ = Control(main_, L"STATIC", L"", 0, 20, 410, 695, 400, 0);
+    SyncVideoControls();
+    wchar_t debug[8]{};
+    renderer_.Initialize(preview_,GetEnvironmentVariableW(L"MOVIEUPSCALING_DEBUG_D3D",debug,8)>0);
     Refresh(); Stop(L"Ready. Select a window and press Start.");
     ShowWindow(main_, show);
     SetTimer(main_, 1, 1000, nullptr); // Status only; never drives frame rendering.
     MSG msg{};
     int result;
     while ((result = GetMessageW(&msg, nullptr, 0, 0)) > 0) {
+        // Child controls also receive local shortcuts. Never register global hotkeys.
+        HWND root=GetAncestor(msg.hwnd,GA_ROOT);
+        if(msg.message==WM_KEYDOWN && (root==main_ || root==preview_) && !(msg.lParam&(1LL<<30)) && Hotkey(msg.wParam)) continue;
         if (!IsDialogMessageW(main_, &msg)) { TranslateMessage(&msg); DispatchMessageW(&msg); }
     }
     capture_.Stop();
@@ -82,6 +112,7 @@ LRESULT CALLBACK AppUI::WindowProc(HWND hwnd, UINT message, WPARAM w, LPARAM l) 
     }
 }
 LRESULT AppUI::Handle(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
+    if(message==WM_KEYDOWN && (hwnd==main_ || hwnd==preview_) && !(l&(1LL<<30)) && Hotkey(w)) return 0;
     if (message == WM_CTLCOLORSTATIC) {
         SetTextColor(reinterpret_cast<HDC>(w), RGB(235, 235, 235));
         SetBkColor(reinterpret_cast<HDC>(w), RGB(0, 0, 0));
@@ -94,8 +125,23 @@ LRESULT AppUI::Handle(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
     }
     if (hwnd == main_) {
         switch (message) {
+        case WM_HSCROLL: UpdateVideoSettings(); return 0;
         case WM_COMMAND:
             switch (LOWORD(w)) {
+            case CropMode:
+                if(HIWORD(w)==CBN_SELCHANGE) {
+                    auto crop=renderer_.Crop(); crop.manual=SendMessageW(cropMode_,CB_GETCURSEL,0,0)==1;
+                    renderer_.SetCrop(crop); if(!crop.manual) renderer_.SetCropEdit(false); SyncVideoControls();
+                }
+                break;
+            case EditCrop: Hotkey(VK_F2); break;
+            case Compare:
+                if(HIWORD(w)==CBN_SELCHANGE) {
+                    auto selection=SendMessageW(compareMode_,CB_GETCURSEL,0,0);
+                    if(selection>=0 && selection<=2) renderer_.SetCompare(static_cast<CompareMode>(selection));
+                    if(renderer_.Compare()!=CompareMode::Off) lastCompare_=renderer_.Compare(); SyncVideoControls();
+                }
+                break;
             case Upscale:
                 if (HIWORD(w) == CBN_SELCHANGE) {
                     auto index = SendMessageW(upscale_, CB_GETCURSEL, 0, 0);
@@ -130,6 +176,24 @@ LRESULT AppUI::Handle(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         }
     } else if (hwnd == preview_) {
         switch (message) {
+        case WM_LBUTTONDOWN:
+            if(renderer_.Compare()!=CompareMode::Off && !renderer_.CropEdit()) {
+                auto r=renderer_.PreviewContentRect();
+                float at=renderer_.Compare()==CompareMode::Vertical ? GET_X_LPARAM(l)-r.x : GET_Y_LPARAM(l)-r.y;
+                float extent=renderer_.Compare()==CompareMode::Vertical ? r.width : r.height;
+                if(extent>0 && std::abs(at-extent*renderer_.Split())<14) { dividerDrag_=true; SetCapture(preview_); }
+            }
+            return 0;
+        case WM_MOUSEMOVE:
+            if(dividerDrag_) {
+                auto r=renderer_.PreviewContentRect();
+                float extent=renderer_.Compare()==CompareMode::Vertical ? r.width : r.height;
+                float at=renderer_.Compare()==CompareMode::Vertical ? GET_X_LPARAM(l)-r.x : GET_Y_LPARAM(l)-r.y;
+                if(extent>0) renderer_.SetSplit(at/extent); SyncVideoControls();
+            }
+            return 0;
+        case WM_LBUTTONUP: if(dividerDrag_) { dividerDrag_=false; ReleaseCapture(); } return 0;
+        case WM_CAPTURECHANGED: dividerDrag_=false; return 0;
         case WM_LBUTTONDBLCLK: Fullscreen(); return 0;
         case WM_KEYDOWN: if (w == VK_ESCAPE && fullscreen_) Fullscreen(); return 0;
         case WM_CLOSE:
@@ -179,7 +243,7 @@ void AppUI::Stop(const wchar_t* reason) {
     renderer_.Clear();
     auto text = std::wstring(reason) + L"\r\nGPU: " + renderer_.AdapterName() +
         L"\r\nUpscaler: " + UpscaleName(renderer_.Mode()) +
-        L"\r\nSettings apply on the next capture frame. SDR; RCAS not enabled.";
+        L"\r\nSettings apply on the next capture frame. F1: compare / F2: crop edit / F3: RCAS.";
     SetWindowTextW(status_, text.c_str());
 }
 void AppUI::OnFrame() {
@@ -210,6 +274,8 @@ void AppUI::Status() {
     const bool pending = renderer_.SettingsPending();
     text << std::fixed << std::setprecision(1)
         << L"Input: " << inputWidth_ << L" x " << inputHeight_ << L" @ " << captureFps_ << L" captured fps\r\n"
+        << L"Captured window: " << inputWidth_ << L" x " << inputHeight_ << L"\r\n"
+        << L"Crop region: " << renderer_.CroppedRegion().width << L" x " << renderer_.CroppedRegion().height << L"\r\n"
         << L"Output: " << output.width << L" x " << output.height << L" @ " << renderFps_ << L" render fps\r\n"
         << L"Preview: " << renderer_.Width() << L" x " << renderer_.Height() << L"\r\n"
         << L"Upscaler: " << UpscaleName(renderer_.Mode());
@@ -218,16 +284,61 @@ void AppUI::Status() {
         text << L" (bilinear downscale)";
     text << std::setprecision(2) << L" | Scale: ";
     if (pending) text << L"pending"; else text << renderer_.Scale() << L"x";
-    text << L"\r\nUpscale GPU time: ";
-    if (pending) text << L"N/A (settings pending)";
-    else if (renderer_.Upscaler().Bypassed()) text << L"N/A (native / 1:1 bypass)";
-    else if (auto ms = renderer_.Upscaler().GPUTimeMs()) text << *ms << L" ms";
-    else text << L"N/A (waiting for valid timestamps)";
+    text << L"\r\nSharpen: RCAS " << renderer_.Sharpen();
+    if(renderer_.CropEdit()) text << L"\r\nCrop edit: full frame / processing suspended";
+    auto timing=renderer_.PostProcessTime();
+    if(pending || renderer_.CropEdit() || !timing) text << L"\r\nUpscale GPU: N/A | RCAS GPU: N/A\r\nPost-process total: N/A";
+    else {
+        const double upscale=renderer_.Upscaler().Bypassed()?0:timing->first;
+        const double rcas=renderer_.Sharpen()==0?0:timing->second;
+        text << L"\r\nUpscale GPU: " << upscale << L" ms | RCAS GPU: " << rcas << L" ms"
+             << L"\r\nPost-process total: " << upscale+rcas << L" ms";
+    }
+    text << L"\r\nCompare: ";
+    if(renderer_.CropEdit()) text << L"paused for crop edit";
+    else if(renderer_.Compare()==CompareMode::Off) text << L"Off";
+    else text << L"Bilinear | " << UpscaleName(renderer_.Mode()) << L" + RCAS " << renderer_.Sharpen()
+              << (renderer_.Compare()==CompareMode::Vertical?L" (vertical ":L" (horizontal ") << int(renderer_.Split()*100) << L"%)";
     text << L"\r\n"
         << L"GPU: " << renderer_.AdapterName() << L"\r\nCPU submit + Present: " << submitMs_ << L" ms (not GPU time)\r\n"
         << L"Discarded queued frames: " << skipped_ << L"\r\n"
+        << L"Capture generation: " << capture_.Generation() << L"\r\n"
         << L"SDR. Black/frozen image: check protection or minimized source.";
     SetWindowTextW(status_, text.str().c_str());
+}
+void AppUI::SyncVideoControls() {
+    SendMessageW(sharpenSlider_,TBM_SETPOS,TRUE,renderer_.Sharpen());
+    SetWindowTextW(sharpenValue_,std::to_wstring(renderer_.Sharpen()).c_str());
+    auto crop=renderer_.Crop(); SendMessageW(cropMode_,CB_SETCURSEL,crop.manual?1:0,0);
+    const int values[]={crop.left,crop.top,crop.right,crop.bottom}; const wchar_t* names[]={L"Left",L"Top",L"Right",L"Bottom"};
+    for(int i=0;i<4;++i) {
+        SendMessageW(cropSliders_[i],TBM_SETPOS,TRUE,values[i]);
+        SetWindowTextW(cropLabels_[i],(std::wstring(names[i])+L": "+std::to_wstring(values[i])+L"%").c_str());
+        ShowWindow(cropSliders_[i],crop.manual?SW_SHOW:SW_HIDE); ShowWindow(cropLabels_[i],crop.manual?SW_SHOW:SW_HIDE);
+    }
+    SetWindowTextW(cropEditButton_,renderer_.CropEdit()?L"Finish Crop (F2)":L"Edit Crop (F2)");
+    SendMessageW(compareMode_,CB_SETCURSEL,static_cast<WPARAM>(renderer_.Compare()),0);
+    SendMessageW(splitSlider_,TBM_SETPOS,TRUE,int(std::lround(renderer_.Split()*100)));
+    SetWindowTextW(splitValue_,(std::to_wstring(int(std::lround(renderer_.Split()*100)))+L"%").c_str());
+}
+void AppUI::UpdateVideoSettings() {
+    renderer_.SetSharpen(static_cast<int>(SendMessageW(sharpenSlider_,TBM_GETPOS,0,0)));
+    if(renderer_.Sharpen()>0) lastSharpen_=renderer_.Sharpen();
+    auto crop=renderer_.Crop();
+    crop.left=static_cast<int>(SendMessageW(cropSliders_[0],TBM_GETPOS,0,0)); crop.top=static_cast<int>(SendMessageW(cropSliders_[1],TBM_GETPOS,0,0));
+    crop.right=static_cast<int>(SendMessageW(cropSliders_[2],TBM_GETPOS,0,0)); crop.bottom=static_cast<int>(SendMessageW(cropSliders_[3],TBM_GETPOS,0,0));
+    renderer_.SetCrop(crop); renderer_.SetSplit(float(SendMessageW(splitSlider_,TBM_GETPOS,0,0))/100);
+    SyncVideoControls();
+}
+bool AppUI::Hotkey(WPARAM key) {
+    if(key==VK_F1) renderer_.SetCompare(renderer_.Compare()==CompareMode::Off?lastCompare_:CompareMode::Off);
+    else if(key==VK_F2) {
+        auto crop=renderer_.Crop(); crop.manual=true; renderer_.SetCrop(crop); renderer_.SetCropEdit(!renderer_.CropEdit());
+    } else if(key==VK_F3) {
+        if(renderer_.Sharpen()) { lastSharpen_=renderer_.Sharpen(); renderer_.SetSharpen(0); }
+        else renderer_.SetSharpen(lastSharpen_);
+    } else return false;
+    SyncVideoControls(); return true;
 }
 void AppUI::Fullscreen() {
     ShowWindow(preview_, SW_SHOW);

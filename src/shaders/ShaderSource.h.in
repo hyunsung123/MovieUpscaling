@@ -7,3 +7,9 @@ inline constexpr char LanczosShader[] = R"hlsl(@COMMON_SHADER@
 @LANCZOS_SHADER@)hlsl";
 inline constexpr char EasuShader[] = R"hlsl(@COMMON_SHADER@
 @EASU_SHADER@)hlsl";
+inline constexpr char BilinearShader[] = R"hlsl(@COMMON_SHADER@
+@BILINEAR_SHADER@)hlsl";
+inline constexpr char RcasShader[] = R"hlsl(@COMMON_SHADER@
+@RCAS_SHADER@)hlsl";
+inline constexpr char CompositeShader[] = R"hlsl(@COMMON_SHADER@
+@COMPOSITE_SHADER@)hlsl";

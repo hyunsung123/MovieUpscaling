@@ -1,8 +1,10 @@
-# AMD FidelityFX FSR 1 EASU
+# AMD FidelityFX FSR 1 EASU and RCAS
 
-`src/shaders/upscale_easu.hlsl` adapts the FP32 EASU functions from
+`src/shaders/upscale_easu.hlsl` and `src/shaders/rcas.hlsl` adapt the FP32 EASU and RCAS functions from
 [AMD ffx_fsr1.h, v1.20210629](https://github.com/GPUOpen-Effects/FidelityFX-FSR/blob/master/ffx-fsr/ffx_fsr1.h).
-Only EASU is adapted; no SDK, RCAS, or other FSR algorithms are bundled.
+Only EASU and RCAS are adapted; the full SDK and other FSR algorithms are not bundled.
+RCAS includes AMD's noise attenuation, guarded reciprocal denominators, a practical
+strength ceiling, and a local overshoot guard described in README.md.
 
 Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
 

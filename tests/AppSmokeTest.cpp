@@ -4,7 +4,27 @@
 #include <string>
 #include <stdexcept>
 #include "renderer/GPUUpscaler.h"
+#include <commctrl.h>
+#include <fstream>
+#include <filesystem>
 namespace {
+bool qualitySource=false;
+LRESULT CALLBACK SourceProc(HWND hwnd,UINT msg,WPARAM w,LPARAM l) {
+    if(msg==WM_PAINT && qualitySource) {
+        PAINTSTRUCT ps{}; auto dc=BeginPaint(hwnd,&ps); RECT r{}; GetClientRect(hwnd,&r);
+        auto brush=CreateSolidBrush(RGB(38,42,48)); FillRect(dc,&r,brush); DeleteObject(brush);
+        SetTextColor(dc,RGB(235,235,235)); SetBkMode(dc,TRANSPARENT);
+        auto font=CreateFontW(38,0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,0,0,ANTIALIASED_QUALITY,0,L"Segoe UI");
+        auto old=SelectObject(dc,font); TextOutW(dc,40,40,L"Manual crop / RCAS / A-B validation",34);
+        TextOutW(dc,140,r.bottom-110,L"Subtitle sample: fine text and diagonal edges",44);
+        for(int i=0;i<70;++i) {
+            auto pen=CreatePen(PS_SOLID,1,RGB(70+i*2,70+i*2,70+i*2)); auto previous=SelectObject(dc,pen);
+            MoveToEx(dc,80+i*8,160,nullptr); LineTo(dc,120+i*9,r.bottom-160); SelectObject(dc,previous); DeleteObject(pen);
+        }
+        SelectObject(dc,old); DeleteObject(font); EndPaint(hwnd,&ps); return 0;
+    }
+    return DefWindowProcW(hwnd,msg,w,l);
+}
 void Require(bool value, const char* message) { if (!value) throw std::runtime_error(message); }
 void Pump(int milliseconds) {
     auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(milliseconds);
@@ -35,21 +55,46 @@ std::wstring Status(HWND main) {
 void Select(HWND main,int id,int index) {
     SendMessageW(GetDlgItem(main,id),CB_SETCURSEL,index,0);
     PostMessageW(main,WM_COMMAND,MAKEWPARAM(id,CBN_SELCHANGE),0);
+    // Let the real combo selection event update dependent sliders before the
+    // test edits them, just as a user opening Manual crop would do.
+    Pump(40);
 }
 void Frames(HWND source,int count) {
     for(int i=0;i<count;++i) { InvalidateRect(source,nullptr,TRUE); Pump(20); }
+}
+void Slider(HWND main,int id,int value) {
+    auto slider=GetDlgItem(main,id); SendMessageW(slider,TBM_SETPOS,TRUE,value);
+    PostMessageW(main,WM_HSCROLL,TB_THUMBPOSITION,reinterpret_cast<LPARAM>(slider));
+}
+std::wstring Generation(std::wstring const& text) {
+    auto begin=text.find(L"Capture generation:"); Require(begin!=std::wstring::npos,"Missing capture generation");
+    return text.substr(begin,text.find(L"\r\n",begin)-begin);
+}
+void Screenshot(HWND window) {
+    std::filesystem::create_directories("validation"); RECT r{}; GetWindowRect(window,&r); int w=r.right-r.left,h=r.bottom-r.top;
+    auto dc=GetWindowDC(window),memory=CreateCompatibleDC(dc);
+    BITMAPINFO info{}; info.bmiHeader.biSize=sizeof(BITMAPINFOHEADER); info.bmiHeader.biWidth=w; info.bmiHeader.biHeight=-h;
+    info.bmiHeader.biPlanes=1; info.bmiHeader.biBitCount=32; info.bmiHeader.biCompression=BI_RGB;
+    void* bits{}; auto bitmap=CreateDIBSection(dc,&info,DIB_RGB_COLORS,&bits,nullptr,0); auto old=SelectObject(memory,bitmap);
+    Require(PrintWindow(window,memory,2)!=0,"UI screenshot failed");
+    BITMAPFILEHEADER header{}; header.bfType=0x4d42; header.bfOffBits=sizeof(header)+sizeof(BITMAPINFOHEADER); header.bfSize=header.bfOffBits+w*h*4;
+    std::ofstream file("validation/app-phase5.bmp",std::ios::binary); file.write(reinterpret_cast<char*>(&header),sizeof(header));
+    file.write(reinterpret_cast<char*>(&info.bmiHeader),sizeof(info.bmiHeader)); file.write(static_cast<char*>(bits),w*h*4);
+    SelectObject(memory,old); DeleteObject(bitmap); DeleteDC(memory); ReleaseDC(window,dc);
 }
 }
 int wmain(int argc, wchar_t** argv) {
     if (argc < 2) return 1;
     bool phase4=argc==3 && std::wstring(argv[2])==L"--phase4";
+    bool phase5=argc==3 && std::wstring(argv[2])==L"--phase5";
+    qualitySource=phase5;
     PROCESS_INFORMATION process{}; HWND source{};
     try {
-        WNDCLASSW cls{}; cls.lpfnWndProc = DefWindowProcW; cls.hInstance = GetModuleHandleW(nullptr);
+        WNDCLASSW cls{}; cls.lpfnWndProc = SourceProc; cls.hInstance = GetModuleHandleW(nullptr);
         cls.hbrBackground = static_cast<HBRUSH>(GetStockObject(WHITE_BRUSH)); cls.lpszClassName = L"AppSmokeSource";
         RegisterClassW(&cls);
-        source = CreateWindowW(cls.lpszClassName, L"Unique app smoke source", (phase4 ? WS_POPUP : WS_OVERLAPPEDWINDOW) | WS_VISIBLE,
-            20, 20, phase4 ? 1280 : 400, phase4 ? 720 : 300, nullptr, nullptr, cls.hInstance, nullptr);
+        source = CreateWindowW(cls.lpszClassName, L"Unique app smoke source", ((phase4||phase5) ? WS_POPUP : WS_OVERLAPPEDWINDOW) | WS_VISIBLE,
+            20, 20, (phase4||phase5) ? 1280 : 400, (phase4||phase5) ? 720 : 300, nullptr, nullptr, cls.hInstance, nullptr);
         Require(source != nullptr, "Source creation failed");
         std::wstring command = L"\"" + std::wstring(argv[1]) + L"\"";
         STARTUPINFOW startup{sizeof(startup)};
@@ -78,6 +123,48 @@ int wmain(int argc, wchar_t** argv) {
         Require(!IsWindowEnabled(GetDlgItem(app.main, 102)) && IsWindowEnabled(GetDlgItem(app.main, 103)), "Capture did not start");
         Require(!status.empty() && !status.starts_with(L"Input: 0 x 0"), "No captured frame reached app status");
         Require(status.find(L"@ 0.0 render fps") == std::wstring::npos, "No rendered frames");
+        if(phase5) {
+            auto generation=Generation(status);
+            auto state=[&]() {
+                Frames(source,10); SendMessageW(app.main,WM_TIMER,1,0); auto s=Status(app.main);
+                Require(Generation(s)==generation,"Settings restarted/duplicated WGC capture");
+                Require(!IsWindowEnabled(GetDlgItem(app.main,102)),"Capture stopped during Phase 5 edits");
+                return s;
+            };
+            Select(app.main,107,3); Select(app.main,109,1); Slider(app.main,114,10); Slider(app.main,116,5);
+            auto firstCrop=state();
+            if(firstCrop.find(L"Crop region: 1280 x 612")==std::wstring::npos) std::wcerr<<firstCrop<<L'\n';
+            Require(firstCrop.find(L"Crop region: 1280 x 612")!=std::wstring::npos,"Top/bottom crop not applied");
+            Slider(app.main,113,10); Slider(app.main,114,20); Slider(app.main,115,15); Slider(app.main,116,10);
+            Require(state().find(L"Crop region: 960 x 504")!=std::wstring::npos,"Asymmetric live crop wrong");
+            for(int id=113;id<=116;++id) Slider(app.main,id,10);
+            Require(state().find(L"Crop region: 1024 x 576")!=std::wstring::npos,"16:9 crop wrong");
+            SendMessageW(app.main,WM_COMMAND,110,0);
+            Require(state().find(L"Crop edit: full frame")!=std::wstring::npos,"Edit Crop button failed");
+            SendMessageW(app.preview,WM_KEYDOWN,VK_F2,0);
+            Require(state().find(L"Crop edit: full frame")==std::wstring::npos,"F2 did not finish crop edit");
+            SetWindowPos(source,nullptr,0,0,1600,900,SWP_NOMOVE|SWP_NOZORDER);
+            Require(state().find(L"Crop region: 1280 x 720")!=std::wstring::npos,"Source resize with crop failed");
+            Slider(app.main,108,100); Require(state().find(L"Sharpen: RCAS 100")!=std::wstring::npos,"Sharpen slider failed");
+            SendMessageW(app.preview,WM_KEYDOWN,VK_F3,0); Require(state().find(L"Sharpen: RCAS 0")!=std::wstring::npos,"F3 bypass failed");
+            SendMessageW(app.main,WM_KEYDOWN,VK_F3,0); Require(state().find(L"Sharpen: RCAS 100")!=std::wstring::npos,"F3 restore failed");
+            for(int direction=1;direction<=2;++direction) for(int pos:{25,50,75}) {
+                Select(app.main,111,direction); Slider(app.main,112,pos); auto s=state();
+                Require(s.find(direction==1?L"(vertical ":L"(horizontal ")!=std::wstring::npos,"Compare direction failed");
+                Require(s.find(std::to_wstring(pos)+L"%)")!=std::wstring::npos,"Split position failed");
+            }
+            SendMessageW(app.preview,WM_KEYDOWN,VK_F1,0); Require(state().find(L"Compare: Off")!=std::wstring::npos,"F1 comparison toggle failed");
+            SendMessageW(app.preview,WM_KEYDOWN,VK_F1,0); Require(state().find(L"(horizontal ")!=std::wstring::npos,"F1 restore orientation failed");
+            Select(app.main,111,1); Slider(app.main,112,50); state();
+            RECT r{}; GetClientRect(app.preview,&r);
+            SendMessageW(app.preview,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(r.right/2,r.bottom/2));
+            SendMessageW(app.preview,WM_MOUSEMOVE,MK_LBUTTON,MAKELPARAM(r.right*3/4,r.bottom/2));
+            SendMessageW(app.preview,WM_LBUTTONUP,0,MAKELPARAM(r.right*3/4,r.bottom/2));
+            state(); Require(SendMessageW(GetDlgItem(app.main,112),TBM_GETPOS,0,0)==75,"Preview divider drag failed");
+            Screenshot(app.main);
+            Select(app.main,109,0); Require(state().find(L"Crop region: 1600 x 900")!=std::wstring::npos,"Crop Off did not restore full source");
+            std::cout<<"PASS: actual app crop edit, live resize, RCAS slider/F3, A/B F1/F2, divider drag; same WGC generation\n";
+        }
         if(phase4) {
             const wchar_t* dimensions[]={L"1920 x 1080",L"2560 x 1440",L"3840 x 2160"};
             Require(status.starts_with(L"Input: 1280 x 720"),"Phase 4 source is not exactly 720p");
@@ -112,9 +199,9 @@ int wmain(int argc, wchar_t** argv) {
         Require((GetWindowLongPtrW(app.preview, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0, "Topmost failed");
         SendMessageW(app.main, WM_COMMAND, 103, 0);
         Require(IsWindowEnabled(GetDlgItem(app.main, 102)), "Stop failed");
-        if(phase4) { Select(app.main,106,2); Select(app.main,107,2); }
+        if(phase4||phase5) { Select(app.main,106,2); Select(app.main,107,2); }
         PostMessageW(app.main, WM_COMMAND, 102, 0); Frames(source,12);
-        if(phase4) {
+        if(phase4||phase5) {
             SendMessageW(app.main,WM_TIMER,1,0); status=Status(app.main);
             Require(status.find(L"Upscaler: Bicubic")!=std::wstring::npos && status.find(L"Output: 2560 x 1440")!=std::wstring::npos,"Stop -> change settings -> Start lost settings");
             Require(status.find(L"@ 0.0 render fps")==std::wstring::npos,"Restart did not render");
@@ -132,6 +219,9 @@ int wmain(int argc, wchar_t** argv) {
         if (process.hProcess) {
             AppWindows app{process.dwProcessId}; Find(app);
             if (app.main) PostMessageW(app.main, WM_CLOSE, 0, 0);
+            // Only the process spawned by THIS test: close an initialization
+            // error dialog too, so a failed test never leaves a locked binary.
+            if(WaitForSingleObject(process.hProcess,1000)!=WAIT_OBJECT_0) TerminateProcess(process.hProcess,1);
             CloseHandle(process.hThread); CloseHandle(process.hProcess);
         }
         if (source) DestroyWindow(source);
