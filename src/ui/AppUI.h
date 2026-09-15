@@ -15,7 +15,7 @@ private:
     void OnFrame();
     void Fullscreen();
     void Status();
-    HWND main_{}, preview_{}, sources_{}, status_{}, start_{}, stop_{};
+    HWND main_{}, preview_{}, sources_{}, status_{}, start_{}, stop_{}, upscale_{}, output_{};
     bool fullscreen_{};
     WINDOWPLACEMENT placement_{sizeof(WINDOWPLACEMENT)};
     std::vector<WindowEntry> windows_;

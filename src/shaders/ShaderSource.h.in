@@ -1,2 +1,9 @@
 #pragma once
-inline constexpr char PresentShader[] = R"hlsl(@PRESENT_SHADER@)hlsl";
+inline constexpr char PresentShader[] = R"hlsl(@COMMON_SHADER@
+@PRESENT_SHADER@)hlsl";
+inline constexpr char BicubicShader[] = R"hlsl(@COMMON_SHADER@
+@BICUBIC_SHADER@)hlsl";
+inline constexpr char LanczosShader[] = R"hlsl(@COMMON_SHADER@
+@LANCZOS_SHADER@)hlsl";
+inline constexpr char EasuShader[] = R"hlsl(@COMMON_SHADER@
+@EASU_SHADER@)hlsl";

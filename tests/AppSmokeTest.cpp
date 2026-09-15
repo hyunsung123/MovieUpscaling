@@ -3,6 +3,7 @@
 #include <iostream>
 #include <string>
 #include <stdexcept>
+#include "renderer/GPUUpscaler.h"
 namespace {
 void Require(bool value, const char* message) { if (!value) throw std::runtime_error(message); }
 void Pump(int milliseconds) {
@@ -24,16 +25,31 @@ void Find(AppWindows& app) {
         return TRUE;
     }, reinterpret_cast<LPARAM>(&app));
 }
+std::wstring Status(HWND main) {
+    for (HWND child=GetWindow(main,GW_CHILD); child; child=GetWindow(child,GW_HWNDNEXT)) {
+        wchar_t buffer[2048]{}; SendMessageW(child,WM_GETTEXT,2048,reinterpret_cast<LPARAM>(buffer));
+        if(std::wstring(buffer).starts_with(L"Input:")) return buffer;
+    }
+    return {};
+}
+void Select(HWND main,int id,int index) {
+    SendMessageW(GetDlgItem(main,id),CB_SETCURSEL,index,0);
+    PostMessageW(main,WM_COMMAND,MAKEWPARAM(id,CBN_SELCHANGE),0);
+}
+void Frames(HWND source,int count) {
+    for(int i=0;i<count;++i) { InvalidateRect(source,nullptr,TRUE); Pump(20); }
+}
 }
 int wmain(int argc, wchar_t** argv) {
-    if (argc != 2) return 1;
+    if (argc < 2) return 1;
+    bool phase4=argc==3 && std::wstring(argv[2])==L"--phase4";
     PROCESS_INFORMATION process{}; HWND source{};
     try {
         WNDCLASSW cls{}; cls.lpfnWndProc = DefWindowProcW; cls.hInstance = GetModuleHandleW(nullptr);
         cls.hbrBackground = static_cast<HBRUSH>(GetStockObject(WHITE_BRUSH)); cls.lpszClassName = L"AppSmokeSource";
         RegisterClassW(&cls);
-        source = CreateWindowW(cls.lpszClassName, L"Unique app smoke source", WS_OVERLAPPEDWINDOW | WS_VISIBLE,
-            20, 20, 400, 300, nullptr, nullptr, cls.hInstance, nullptr);
+        source = CreateWindowW(cls.lpszClassName, L"Unique app smoke source", (phase4 ? WS_POPUP : WS_OVERLAPPEDWINDOW) | WS_VISIBLE,
+            20, 20, phase4 ? 1280 : 400, phase4 ? 720 : 300, nullptr, nullptr, cls.hInstance, nullptr);
         Require(source != nullptr, "Source creation failed");
         std::wstring command = L"\"" + std::wstring(argv[1]) + L"\"";
         STARTUPINFOW startup{sizeof(startup)};
@@ -62,6 +78,31 @@ int wmain(int argc, wchar_t** argv) {
         Require(!IsWindowEnabled(GetDlgItem(app.main, 102)) && IsWindowEnabled(GetDlgItem(app.main, 103)), "Capture did not start");
         Require(!status.empty() && !status.starts_with(L"Input: 0 x 0"), "No captured frame reached app status");
         Require(status.find(L"@ 0.0 render fps") == std::wstring::npos, "No rendered frames");
+        if(phase4) {
+            const wchar_t* dimensions[]={L"1920 x 1080",L"2560 x 1440",L"3840 x 2160"};
+            Require(status.starts_with(L"Input: 1280 x 720"),"Phase 4 source is not exactly 720p");
+            for(int output=1;output<=3;++output) for(int mode=0;mode<5;++mode) {
+                Select(app.main,106,mode); Select(app.main,107,output); Frames(source,10);
+                SendMessageW(app.main,WM_TIMER,1,0); status=Status(app.main);
+                Require(!IsWindowEnabled(GetDlgItem(app.main,102)),"Capture stopped during setting change");
+                Require(status.find(std::wstring(L"Output: ")+dimensions[output-1])!=std::wstring::npos,"Output setting not applied");
+                Require(status.find(std::wstring(L"Upscaler: ")+UpscaleName(static_cast<UpscaleMode>(mode)))!=std::wstring::npos,"Upscale setting not applied");
+                Require(status.find(L"@ 0.0 render fps")==std::wstring::npos,"Settings changed but rendering stalled");
+                const wchar_t* ratios[]={L"1.50x",L"2.00x",L"3.00x"};
+                Require(status.find(std::wstring(L"Scale: ")+(mode==0?L"1.00x":ratios[output-1]))!=std::wstring::npos,"Wrong upscale ratio");
+            }
+            SetWindowPos(source,nullptr,0,0,640,480,SWP_NOMOVE|SWP_NOZORDER);
+            SetWindowPos(app.preview,nullptr,0,0,760,600,SWP_NOMOVE|SWP_NOZORDER);
+            Frames(source,15); SendMessageW(app.main,WM_TIMER,1,0); status=Status(app.main);
+            Require(status.starts_with(L"Input: 640 x 480"),"Source resize failed during upscale");
+            Require(status.find(L"Scale: 4.50x")!=std::wstring::npos,"4:3 source aspect fit failed");
+            // Auto must match the monitor containing Preview, independently of its window size.
+            Select(app.main,107,0); Frames(source,8); SendMessageW(app.main,WM_TIMER,1,0);
+            MONITORINFO monitor{sizeof(monitor)}; GetMonitorInfoW(MonitorFromWindow(app.preview,MONITOR_DEFAULTTONEAREST),&monitor);
+            auto expected=L"Output: "+std::to_wstring(monitor.rcMonitor.right-monitor.rcMonitor.left)+L" x "+std::to_wstring(monitor.rcMonitor.bottom-monitor.rcMonitor.top);
+            Require(Status(app.main).find(expected)!=std::wstring::npos,"Auto does not match Preview monitor");
+            std::cout << "PASS: live 5-mode x 3-resolution changes, exact 720p, source/Preview resize, aspect ratio, Auto monitor\n";
+        }
         SendMessageW(app.main, WM_COMMAND, 104, 0);
         Require((GetWindowLongPtrW(app.preview, GWL_STYLE) & WS_CAPTION) == 0, "Fullscreen failed");
         SendMessageW(app.preview, WM_KEYDOWN, VK_ESCAPE, 0);
@@ -71,7 +112,13 @@ int wmain(int argc, wchar_t** argv) {
         Require((GetWindowLongPtrW(app.preview, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0, "Topmost failed");
         SendMessageW(app.main, WM_COMMAND, 103, 0);
         Require(IsWindowEnabled(GetDlgItem(app.main, 102)), "Stop failed");
-        PostMessageW(app.main, WM_COMMAND, 102, 0); Pump(100);
+        if(phase4) { Select(app.main,106,2); Select(app.main,107,2); }
+        PostMessageW(app.main, WM_COMMAND, 102, 0); Frames(source,12);
+        if(phase4) {
+            SendMessageW(app.main,WM_TIMER,1,0); status=Status(app.main);
+            Require(status.find(L"Upscaler: Bicubic")!=std::wstring::npos && status.find(L"Output: 2560 x 1440")!=std::wstring::npos,"Stop -> change settings -> Start lost settings");
+            Require(status.find(L"@ 0.0 render fps")==std::wstring::npos,"Restart did not render");
+        }
         SendMessageW(app.preview, WM_CLOSE, 0, 0);
         Require(!IsWindowVisible(app.preview) && IsWindowEnabled(GetDlgItem(app.main, 102)), "Preview close failed");
         SendMessageW(app.main, WM_CLOSE, 0, 0);

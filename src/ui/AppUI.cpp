@@ -5,6 +5,7 @@
 using namespace winrt;
 namespace {
 constexpr int Source = 100, RefreshList = 101, StartCapture = 102, StopCapture = 103, ToggleFullscreen = 104, Topmost = 105;
+constexpr int Upscale = 106, Output = 107;
 HWND Control(HWND parent, const wchar_t* cls, const wchar_t* text, DWORD style, int x, int y, int w, int h, int id) {
     HWND hwnd = CreateWindowExW(0, cls, text, WS_CHILD | WS_VISIBLE | style, x, y, w, h, parent,
         reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), GetModuleHandleW(nullptr), nullptr);
@@ -22,9 +23,9 @@ int AppUI::Run(HINSTANCE instance, int show) {
     cls.hbrBackground = static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
     cls.lpszClassName = L"WindowGPUPreview";
     if (!RegisterClassExW(&cls)) throw_last_error();
-    main_ = CreateWindowExW(0, cls.lpszClassName, L"Window GPU Preview - Phase 1-3",
+    main_ = CreateWindowExW(0, cls.lpszClassName, L"Window GPU Preview - GPU Upscaling",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, CW_USEDEFAULT, CW_USEDEFAULT,
-        650, 390, nullptr, nullptr, instance, this);
+        690, 540, nullptr, nullptr, instance, this);
     if (!main_) throw_last_error();
     preview_ = CreateWindowExW(0, cls.lpszClassName, L"GPU Preview - double click: fullscreen / Esc: windowed",
         WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 960, 600, nullptr, nullptr, instance, this);
@@ -34,11 +35,20 @@ int AppUI::Run(HINSTANCE instance, int show) {
     Control(main_, L"STATIC", L"Source window", 0, 20, 20, 150, 22, 0);
     sources_ = Control(main_, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 20, 48, 490, 260, Source);
     Control(main_, L"BUTTON", L"Refresh", WS_TABSTOP, 520, 48, 90, 26, RefreshList);
-    start_ = Control(main_, L"BUTTON", L"Start", WS_TABSTOP, 20, 95, 100, 32, StartCapture);
-    stop_ = Control(main_, L"BUTTON", L"Stop", WS_TABSTOP, 130, 95, 100, 32, StopCapture);
-    Control(main_, L"BUTTON", L"Fullscreen", WS_TABSTOP, 240, 95, 110, 32, ToggleFullscreen);
-    Control(main_, L"BUTTON", L"Always on top", BS_AUTOCHECKBOX | WS_TABSTOP, 370, 95, 160, 32, Topmost);
-    status_ = Control(main_, L"STATIC", L"", 0, 20, 150, 595, 170, 0);
+    Control(main_, L"STATIC", L"Upscale", 0, 20, 90, 120, 22, 0);
+    upscale_ = Control(main_, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP, 20, 116, 250, 220, Upscale);
+    for (int i = 0; i < 5; ++i) SendMessageW(upscale_, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(UpscaleName(static_cast<UpscaleMode>(i))));
+    SendMessageW(upscale_, CB_SETCURSEL, static_cast<WPARAM>(renderer_.Mode()), 0);
+    Control(main_, L"STATIC", L"Output", 0, 300, 90, 150, 22, 0);
+    output_ = Control(main_, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP, 300, 116, 310, 200, Output);
+    for (auto label : {L"Auto (Preview monitor)", L"1920 x 1080", L"2560 x 1440", L"3840 x 2160"})
+        SendMessageW(output_, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label));
+    SendMessageW(output_, CB_SETCURSEL, 0, 0);
+    start_ = Control(main_, L"BUTTON", L"Start", WS_TABSTOP, 20, 166, 100, 32, StartCapture);
+    stop_ = Control(main_, L"BUTTON", L"Stop", WS_TABSTOP, 130, 166, 100, 32, StopCapture);
+    Control(main_, L"BUTTON", L"Fullscreen", WS_TABSTOP, 240, 166, 110, 32, ToggleFullscreen);
+    Control(main_, L"BUTTON", L"Always on top", BS_AUTOCHECKBOX | WS_TABSTOP, 370, 166, 160, 32, Topmost);
+    status_ = Control(main_, L"STATIC", L"", 0, 20, 220, 645, 255, 0);
     renderer_.Initialize(preview_);
     Refresh(); Stop(L"Ready. Select a window and press Start.");
     ShowWindow(main_, show);
@@ -86,6 +96,18 @@ LRESULT AppUI::Handle(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         switch (message) {
         case WM_COMMAND:
             switch (LOWORD(w)) {
+            case Upscale:
+                if (HIWORD(w) == CBN_SELCHANGE) {
+                    auto index = SendMessageW(upscale_, CB_GETCURSEL, 0, 0);
+                    if (index >= 0 && index < 5) renderer_.SetUpscaleMode(static_cast<UpscaleMode>(index));
+                }
+                break;
+            case Output:
+                if (HIWORD(w) == CBN_SELCHANGE) {
+                    auto index = SendMessageW(output_, CB_GETCURSEL, 0, 0);
+                    if (index >= 0 && index < 4) renderer_.SetOutputMode(static_cast<OutputMode>(index));
+                }
+                break;
             case RefreshList: Refresh(); break;
             case StartCapture: Start(); break;
             case StopCapture: Stop(L"Stopped."); break;
@@ -156,7 +178,8 @@ void AppUI::Stop(const wchar_t* reason) {
     EnableWindow(start_, TRUE); EnableWindow(stop_, FALSE);
     renderer_.Clear();
     auto text = std::wstring(reason) + L"\r\nGPU: " + renderer_.AdapterName() +
-        L"\r\nMode: GPU passthrough / bilinear aspect fit (SDR)\r\nFSR, sharpening and GPU timing: planned for later phases.";
+        L"\r\nUpscaler: " + UpscaleName(renderer_.Mode()) +
+        L"\r\nSettings apply on the next capture frame. SDR; RCAS not enabled.";
     SetWindowTextW(status_, text.c_str());
 }
 void AppUI::OnFrame() {
@@ -183,12 +206,27 @@ void AppUI::Status() {
     captureFps_ = captured_ / seconds; renderFps_ = rendered_ / seconds;
     captured_ = rendered_ = 0; statsTime_ = now;
     std::wostringstream text;
+    auto output = renderer_.OutputSize();
+    const bool pending = renderer_.SettingsPending();
     text << std::fixed << std::setprecision(1)
         << L"Input: " << inputWidth_ << L" x " << inputHeight_ << L" @ " << captureFps_ << L" captured fps\r\n"
-        << L"Output: " << renderer_.Width() << L" x " << renderer_.Height() << L" @ " << renderFps_ << L" render fps\r\n"
+        << L"Output: " << output.width << L" x " << output.height << L" @ " << renderFps_ << L" render fps\r\n"
+        << L"Preview: " << renderer_.Width() << L" x " << renderer_.Height() << L"\r\n"
+        << L"Upscaler: " << UpscaleName(renderer_.Mode());
+    if (pending) text << L" (pending next frame)";
+    else if (renderer_.Mode() == UpscaleMode::Easu && renderer_.Upscaler().EffectiveMode() == UpscaleMode::Bilinear)
+        text << L" (bilinear downscale)";
+    text << std::setprecision(2) << L" | Scale: ";
+    if (pending) text << L"pending"; else text << renderer_.Scale() << L"x";
+    text << L"\r\nUpscale GPU time: ";
+    if (pending) text << L"N/A (settings pending)";
+    else if (renderer_.Upscaler().Bypassed()) text << L"N/A (native / 1:1 bypass)";
+    else if (auto ms = renderer_.Upscaler().GPUTimeMs()) text << *ms << L" ms";
+    else text << L"N/A (waiting for valid timestamps)";
+    text << L"\r\n"
         << L"GPU: " << renderer_.AdapterName() << L"\r\nCPU submit + Present: " << submitMs_ << L" ms (not GPU time)\r\n"
-        << L"Discarded queued frames: " << skipped_ << L" | GPU time: N/A\r\n"
-        << L"SDR passthrough. Black/frozen image: check protection or minimized source.";
+        << L"Discarded queued frames: " << skipped_ << L"\r\n"
+        << L"SDR. Black/frozen image: check protection or minimized source.";
     SetWindowTextW(status_, text.str().c_str());
 }
 void AppUI::Fullscreen() {

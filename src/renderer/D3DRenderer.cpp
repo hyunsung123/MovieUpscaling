@@ -1,8 +1,9 @@
 #include "D3DRenderer.h"
 #include "utils/GPUInfo.h"
 #include "ShaderSource.h"
-#include <d3dcompiler.h>
+#include "ShaderCompiler.h"
 #include <algorithm>
+#include <cmath>
 using namespace winrt;
 void D3DRenderer::Initialize(HWND preview) {
     hwnd_ = preview;
@@ -26,15 +27,7 @@ void D3DRenderer::Initialize(HWND preview) {
     desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
     check_hresult(factory->CreateSwapChainForHwnd(device_.get(), hwnd_, &desc, nullptr, nullptr, swapChain_.put()));
     check_hresult(factory->MakeWindowAssociation(hwnd_, DXGI_MWA_NO_ALT_ENTER));
-    auto compile = [](const char* entry, const char* profile) {
-        com_ptr<ID3DBlob> blob, errors;
-        HRESULT hr = D3DCompile(PresentShader, sizeof(PresentShader) - 1, "present.hlsl", nullptr, nullptr,
-            entry, profile, D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, blob.put(), errors.put());
-        if (FAILED(hr) && errors) OutputDebugStringA(static_cast<const char*>(errors->GetBufferPointer()));
-        check_hresult(hr);
-        return blob;
-    };
-    auto vs = compile("VSMain", "vs_5_0"), ps = compile("PSMain", "ps_5_0");
+    auto vs = CompileShader(PresentShader, "VSMain", "vs_5_0"), ps = CompileShader(PresentShader, "PSMain", "ps_5_0");
     check_hresult(device_->CreateVertexShader(vs->GetBufferPointer(), vs->GetBufferSize(), nullptr, vertex_.put()));
     check_hresult(device_->CreatePixelShader(ps->GetBufferPointer(), ps->GetBufferSize(), nullptr, pixel_.put()));
     D3D11_SAMPLER_DESC samp{};
@@ -42,7 +35,23 @@ void D3DRenderer::Initialize(HWND preview) {
     samp.AddressU = samp.AddressV = samp.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
     samp.MaxLOD = D3D11_FLOAT32_MAX;
     check_hresult(device_->CreateSamplerState(&samp, sampler_.put()));
+    D3D11_RASTERIZER_DESC raster{};
+    raster.FillMode = D3D11_FILL_SOLID; raster.CullMode = D3D11_CULL_NONE;
+    raster.DepthClipEnable = TRUE; raster.ScissorEnable = TRUE;
+    check_hresult(device_->CreateRasterizerState(&raster, scissor_.put()));
+    upscaler_.Initialize(device_.get());
     Clear();
+}
+UpscaleSize D3DRenderer::OutputSize() const {
+    switch (outputMode_) {
+    case OutputMode::FullHD: return {1920, 1080};
+    case OutputMode::QHD: return {2560, 1440};
+    case OutputMode::UHD: return {3840, 2160};
+    default:
+        MONITORINFO info{sizeof(info)};
+        check_bool(GetMonitorInfoW(MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST), &info));
+        return {static_cast<UINT>(info.rcMonitor.right - info.rcMonitor.left), static_cast<UINT>(info.rcMonitor.bottom - info.rcMonitor.top)};
+    }
 }
 bool D3DRenderer::Resize() {
     RECT rect{};
@@ -88,11 +97,22 @@ bool D3DRenderer::Render(ID3D11Texture2D* source, UINT width, UINT height) {
     // buffer flags. No staging resource, Map, readback, or CPU pixel processing.
     D3D11_BOX box{0, 0, 0, width, height, 1};
     context_->CopySubresourceRegion(input_.get(), 0, 0, 0, 0, source, 0, &box);
+    const auto output = OutputSize();
+    contentSize_ = FitOutput(width, height, output.width, output.height, mode_);
+    auto view = upscaler_.Process(inputView_.get(), width, height, contentSize_.width, contentSize_.height, mode_);
+    appliedMode_ = mode_; appliedOutput_ = output;
     const float black[] = {0, 0, 0, 1};
     context_->ClearRenderTargetView(target_.get(), black);
-    const float scale = std::min(float(width_) / width, float(height_) / height);
-    D3D11_VIEWPORT viewport{(width_ - width * scale) / 2, (height_ - height * scale) / 2,
-        width * scale, height * scale, 0, 1};
+    // Present the selected output canvas inside the window. Content-only
+    // intermediate textures avoid shading black bars. Native stays 1:1 in the
+    // output canvas; scissoring center-crops only if the source exceeds it.
+    const float scale = std::min(float(width_) / output.width, float(height_) / output.height);
+    const float canvasX = (width_ - output.width * scale) / 2, canvasY = (height_ - output.height * scale) / 2;
+    D3D11_RECT clip{static_cast<LONG>(std::lround(canvasX)), static_cast<LONG>(std::lround(canvasY)),
+        static_cast<LONG>(std::lround(canvasX + output.width * scale)), static_cast<LONG>(std::lround(canvasY + output.height * scale))};
+    context_->RSSetState(scissor_.get()); context_->RSSetScissorRects(1, &clip);
+    D3D11_VIEWPORT viewport{(width_ - contentSize_.width * scale) / 2, (height_ - contentSize_.height * scale) / 2,
+        contentSize_.width * scale, contentSize_.height * scale, 0, 1};
     context_->RSSetViewports(1, &viewport);
     auto target = target_.get();
     context_->OMSetRenderTargets(1, &target, nullptr);
@@ -100,7 +120,7 @@ bool D3DRenderer::Render(ID3D11Texture2D* source, UINT width, UINT height) {
     context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     context_->VSSetShader(vertex_.get(), nullptr, 0);
     context_->PSSetShader(pixel_.get(), nullptr, 0);
-    auto view = inputView_.get(); auto sampler = sampler_.get();
+    auto sampler = sampler_.get();
     context_->PSSetShaderResources(0, 1, &view);
     context_->PSSetSamplers(0, 1, &sampler);
     context_->Draw(3, 0);
