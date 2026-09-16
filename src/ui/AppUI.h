@@ -16,8 +16,10 @@ private:
     void Fullscreen();
     void Status(bool sampleCounters=true);
     void SyncVideoControls();
-    void UpdateVideoSettings();
-    void RedrawSharpen();
+    void UpdateVideoSettings(int controlId);
+    void RedrawSettings();
+    void GuideStatus();
+    void ChangeGuide();
     bool Hotkey(WPARAM key);
     HWND main_{}, preview_{}, sources_{}, status_{}, start_{}, stop_{}, upscale_{}, output_{};
     bool fullscreen_{};
@@ -26,6 +28,8 @@ private:
     int lastSharpen_{25};
     CompareMode lastCompare_{CompareMode::Vertical};
     bool dividerDrag_{};
+    bool fitted720_{};
+    HWND inputGuide_{},guideWidth_{},guideHeight_{},customLabel_{},fit720_{},aspectLock_{},preset720_{},guideStatus_{};
     WINDOWPLACEMENT placement_{sizeof(WINDOWPLACEMENT)};
     std::vector<WindowEntry> windows_;
     D3DRenderer renderer_;

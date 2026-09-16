@@ -101,7 +101,19 @@ int main() {
             if(strength) Require(renderer.RCASAllocations()==1,"Paused setting change reallocated RCAS");
             auto name="runtime-rcas-"+std::to_string(strength)+".bmp"; Save(name.c_str(),2560,1440,image);
         }
+        renderer.SetCrop(PixelCrop({2,5,1274,712}));
+        Require(renderer.FitInput720p(true),"Quick preset failed");
+        Require(renderer.Crop().aspect16x9 && renderer.Crop().pixels==SourceRegion{2,5,1274,712},"Preset changed an already-good crop");
+        Require(renderer.Guide().mode==GuideMode::HD720 && renderer.OutputSize()==UpscaleSize{2560,1440} && renderer.Mode()==UpscaleMode::Easu && renderer.Sharpen()==25,"Preset settings incorrect");
+        Require(renderer.Redraw() && renderer.CroppedRegion()==SourceRegion{2,5,1274,712},"Preset did not preserve the processing region");
+        renderer.SetCropEdit(true); renderer.Redraw();
+        auto overlay=RendererTestAccess::DrawAndInspect(renderer); Save("guide-runtime-edit.bmp",2560,1440,overlay);
+        renderer.SetCropEdit(false); renderer.Redraw();
+        auto normal=RendererTestAccess::DrawAndInspect(renderer);
+        renderer.SetInputGuide({}); renderer.Redraw();
+        Require(normal==RendererTestAccess::DrawAndInspect(renderer),"Guide leaked into EASU/RCAS output");
         renderer.Clear(); Require(!renderer.Redraw(),"Stop/Clear retained a displayable stale frame");
+        Require(!renderer.FitInput720p(true),"Preset used a cleared frame");
         com_ptr<ID3D11Device> device; device.copy_from(renderer.Device());
         if(auto info=device.try_as<ID3D11InfoQueue>()) {
             for(UINT64 i=0;i<info->GetNumStoredMessages();++i) {

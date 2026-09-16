@@ -62,6 +62,39 @@ std::wstring Status(HWND main) {
     }
     return {};
 }
+std::wstring GuideStatus(HWND main) {
+    for(HWND child=GetWindow(main,GW_CHILD);child;child=GetWindow(child,GW_HWNDNEXT)) {
+        wchar_t text[2048]{}; SendMessageW(child,WM_GETTEXT,2048,reinterpret_cast<LPARAM>(text));
+        if(std::wstring(text).starts_with(L"Captured Window:")) return text;
+    }
+    return {};
+}
+HWND OpenTestChrome(const wchar_t* executable,PROCESS_INFORMATION& process,std::wstring& title) {
+    auto directory=std::filesystem::absolute("validation/chrome-guide-"+std::to_string(GetCurrentProcessId()));
+    std::filesystem::create_directories(directory);
+    auto page=directory/"guide.html";
+    title=L"MovieUpscaling input guide validation "+std::to_wstring(GetCurrentProcessId());
+    std::ofstream html(page);
+    html<<"<!doctype html><title>MovieUpscaling input guide validation "<<GetCurrentProcessId()<<"</title>"
+        <<"<style>body{margin:0;background:#203040;color:white;font:32px sans-serif}"
+        <<"main{width:1280px;height:720px;margin:60px auto;background:repeating-linear-gradient(28deg,#303840 0px,#303840 7px,#526476 8px,#303840 9px);outline:2px solid white}"
+        <<"h1,p{padding:24px;background:#20252bcc}</style><main><h1>720p crop guide validation</h1>"
+        <<"<p>Local test page. Captured pixels only.</p><p>Fine detail / subtitles / 0123456789</p></main>";
+    html.close(); Require(bool(html),"Chrome fixture write failed");
+    std::wstring command=L"\""+std::wstring(executable)+L"\" --no-first-run --no-default-browser-check --user-data-dir=\""+
+        (directory/L"profile").wstring()+L"\" --window-size=1536,960 --app=\"file:///"+page.generic_wstring()+L"\"";
+    STARTUPINFOW startup{sizeof(startup)};
+    Require(CreateProcessW(executable,command.data(),nullptr,nullptr,FALSE,0,nullptr,nullptr,&startup,&process),"Test Chrome launch failed");
+    struct Search {std::wstring title; HWND found{};} search{title};
+    for(int attempt=0;attempt<200 && !search.found;++attempt) {
+        Pump(50);
+        EnumWindows([](HWND hwnd,LPARAM p)->BOOL {
+            auto& s=*reinterpret_cast<Search*>(p); wchar_t text[512]{}; GetWindowTextW(hwnd,text,512);
+            if(IsWindowVisible(hwnd) && std::wstring(text).starts_with(s.title)) {s.found=hwnd;return FALSE;} return TRUE;
+        },reinterpret_cast<LPARAM>(&search));
+    }
+    Require(search.found!=nullptr,"Test Chrome window missing"); return search.found;
+}
 void Select(HWND main,int id,int index) {
     SendMessageW(GetDlgItem(main,id),CB_SETCURSEL,index,0);
     PostMessageW(main,WM_COMMAND,MAKEWPARAM(id,CBN_SELCHANGE),0);
@@ -98,18 +131,23 @@ int wmain(int argc, wchar_t** argv) {
     bool phase4=argc==3 && std::wstring(argv[2])==L"--phase4";
     bool phase5=argc==3 && std::wstring(argv[2])==L"--phase5";
     bool paused=argc==3 && std::wstring(argv[2])==L"--rcas";
+    bool chromeGuide=argc==4 && std::wstring(argv[2])==L"--chrome-guide";
+    bool guide=chromeGuide || (argc==3 && std::wstring(argv[2])==L"--guide");
+    if(guide) SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     if(paused) {
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         pausedFixture=DetailFixture();
     }
-    qualitySource=phase5;
-    PROCESS_INFORMATION process{}; HWND source{};
+    qualitySource=phase5 || guide;
+    PROCESS_INFORMATION process{},chromeProcess{}; HWND source{};
+    std::wstring sourceTitle=L"Unique app smoke source";
     try {
         WNDCLASSW cls{}; cls.lpfnWndProc = SourceProc; cls.hInstance = GetModuleHandleW(nullptr);
         cls.hbrBackground = static_cast<HBRUSH>(GetStockObject(WHITE_BRUSH)); cls.lpszClassName = L"AppSmokeSource";
         RegisterClassW(&cls);
-        source = CreateWindowW(cls.lpszClassName, L"Unique app smoke source", ((phase4||phase5||paused) ? WS_POPUP : WS_OVERLAPPEDWINDOW) | WS_VISIBLE,
-            20, 20, (phase4||phase5||paused) ? 1280 : 400, (phase4||phase5||paused) ? 720 : 300, nullptr, nullptr, cls.hInstance, nullptr);
+        if(chromeGuide) source=OpenTestChrome(argv[3],chromeProcess,sourceTitle);
+        else source = CreateWindowW(cls.lpszClassName, sourceTitle.c_str(), ((phase4||phase5||paused||guide) ? WS_POPUP : WS_OVERLAPPEDWINDOW) | WS_VISIBLE,
+            20, 20, guide?1366:(phase4||phase5||paused)?1280:400, guide?768:(phase4||phase5||paused)?720:300, nullptr, nullptr, cls.hInstance, nullptr);
         Require(source != nullptr, "Source creation failed");
         std::wstring command = L"\"" + std::wstring(argv[1]) + L"\"";
         STARTUPINFOW startup{sizeof(startup)};
@@ -121,7 +159,7 @@ int wmain(int argc, wchar_t** argv) {
         std::cout << "App ready; refreshing\n" << std::flush;
         SendMessageW(app.main, WM_COMMAND, 101, 0);
         HWND combo = GetDlgItem(app.main, 100);
-        int selected = static_cast<int>(SendMessageW(combo, CB_FINDSTRING, static_cast<WPARAM>(-1), reinterpret_cast<LPARAM>(L"Unique app smoke source")));
+        int selected = static_cast<int>(SendMessageW(combo, CB_FINDSTRING, static_cast<WPARAM>(-1), reinterpret_cast<LPARAM>(sourceTitle.c_str())));
         Require(selected >= 0, "Source not enumerated");
         std::cout << "Source selected; starting\n" << std::flush;
         SendMessageW(combo, CB_SETCURSEL, selected, 0);
@@ -138,6 +176,42 @@ int wmain(int argc, wchar_t** argv) {
         Require(!IsWindowEnabled(GetDlgItem(app.main, 102)) && IsWindowEnabled(GetDlgItem(app.main, 103)), "Capture did not start");
         Require(!status.empty() && !status.starts_with(L"Input: 0 x 0"), "No captured frame reached app status");
         Require(status.find(L"@ 0.0 render fps") == std::wstring::npos, "No rendered frames");
+        if(guide) {
+            auto generation=Generation(status); RECT before{}; GetWindowRect(source,&before);
+            Require(SendMessageW(GetDlgItem(app.main,117),CB_GETCURSEL,0,0)==0,"Guide not Off by default");
+            SendMessageW(app.main,WM_COMMAND,110,0); Select(app.main,117,1);
+            SendMessageW(app.main,WM_COMMAND,120,0);
+            auto s=GuideStatus(app.main);
+            Require(s.find(L"Current Crop: 1280 x 720")!=std::wstring::npos && s.find(L"720p target: GOOD")!=std::wstring::npos,"Fit 720p/GOOD failed");
+            Require(s.find(L"Processing input: ~720p")!=std::wstring::npos,"Processing input label missing");
+            Require(s.find(L"Difference: +0 x +0")!=std::wstring::npos,"Target difference wrong");
+            Select(app.main,117,2); Require(GuideStatus(app.main).find(L"Target Guide: 1920 x 1080")!=std::wstring::npos,"1080p guide selection failed");
+            Select(app.main,117,3);
+            SendMessageW(GetDlgItem(app.main,118),WM_SETTEXT,0,reinterpret_cast<LPARAM>(L"1200"));
+            SendMessageW(GetDlgItem(app.main,119),WM_SETTEXT,0,reinterpret_cast<LPARAM>(L"700"));
+            SendMessageW(app.main,WM_COMMAND,MAKEWPARAM(119,EN_KILLFOCUS),reinterpret_cast<LPARAM>(GetDlgItem(app.main,119)));
+            if(GuideStatus(app.main).find(L"Target Guide: 1200 x 700")==std::wstring::npos) std::wcerr<<GuideStatus(app.main)<<L'\n';
+            Require(GuideStatus(app.main).find(L"Target Guide: 1200 x 700")!=std::wstring::npos,"Custom guide failed");
+            Select(app.main,121,1); Slider(app.main,113,10); Pump(60);
+            Require(GuideStatus(app.main).find(L"Current Crop:")!=std::wstring::npos,"Aspect crop status missing");
+            SendMessageW(app.main,WM_COMMAND,122,0);
+            s=GuideStatus(app.main); auto mainStatus=Status(app.main);
+            Require(s.find(L"720p target: GOOD")!=std::wstring::npos,"Preset did not fit crop");
+            Require(SendMessageW(GetDlgItem(app.main,117),CB_GETCURSEL,0,0)==1 && SendMessageW(GetDlgItem(app.main,121),CB_GETCURSEL,0,0)==1,"Preset guide/lock failed");
+            Require(mainStatus.find(L"Output: 2560 x 1440")!=std::wstring::npos && mainStatus.find(L"Upscaler: FSR EASU")!=std::wstring::npos && mainStatus.find(L"Sharpen: RCAS 25")!=std::wstring::npos,"Preset pipeline settings failed");
+            Require(Generation(mainStatus)==generation,"Guide restarted WGC session");
+            Screenshot(app.main,chromeGuide?"guide-chrome-ui.bmp":"guide-ui.bmp");
+            if(chromeGuide) Screenshot(source,"guide-chrome-source.bmp");
+            SendMessageW(app.main,WM_COMMAND,110,0);
+            Require(Status(app.main).find(L"Crop edit:")==std::wstring::npos && Status(app.main).find(L"RCAS: Active")!=std::wstring::npos,"Leaving edit did not resume RCAS");
+            RECT after{}; GetWindowRect(source,&after); Require(EqualRect(&before,&after),"Guide resized the external source window");
+            if(!chromeGuide) {
+                SetWindowPos(source,nullptr,0,0,640,480,SWP_NOMOVE|SWP_NOZORDER); Frames(source,15);
+                SendMessageW(app.main,WM_COMMAND,120,0); s=GuideStatus(app.main);
+                Require(s.find(L"Current Crop: 640 x 360")!=std::wstring::npos && s.find(L"Source smaller than 720p target")!=std::wstring::npos,"Small-source fit failed");
+            }
+            std::cout<<"PASS actual "<<(chromeGuide?"Chrome":"test window")<<": guide modes/custom, Fit720p/GOOD, aspect lock, preset, resume processing; source window unchanged\n";
+        }
         if(paused) {
             Select(app.main,107,2);
             SendMessageW(app.main,WM_COMMAND,104,0);
@@ -217,10 +291,18 @@ int wmain(int argc, wchar_t** argv) {
             for(int output=1;output<=3;++output) for(int mode=0;mode<5;++mode) {
                 Select(app.main,106,mode); Select(app.main,107,output); Frames(source,10);
                 SendMessageW(app.main,WM_TIMER,1,0); status=Status(app.main);
+                // The real 1-second timer can reset counters immediately before
+                // our forced sample. A single zero-duration interval is not a
+                // stall: allow fresh capture events, with a bounded deadline.
+                for(int attempt=0;attempt<8 && (status.find(L"@ 0.0 render fps")!=std::wstring::npos || status.find(L"pending next frame")!=std::wstring::npos);++attempt) {
+                    Frames(source,3); SendMessageW(app.main,WM_TIMER,1,0); status=Status(app.main);
+                }
                 Require(!IsWindowEnabled(GetDlgItem(app.main,102)),"Capture stopped during setting change");
                 Require(status.find(std::wstring(L"Output: ")+dimensions[output-1])!=std::wstring::npos,"Output setting not applied");
                 Require(status.find(std::wstring(L"Upscaler: ")+UpscaleName(static_cast<UpscaleMode>(mode)))!=std::wstring::npos,"Upscale setting not applied");
+                if(status.find(L"@ 0.0 render fps")!=std::wstring::npos) std::wcerr<<L"Output selection "<<output<<L", mode "<<mode<<L"\n"<<status<<L'\n';
                 Require(status.find(L"@ 0.0 render fps")==std::wstring::npos,"Settings changed but rendering stalled");
+                Require(status.find(L"pending next frame")==std::wstring::npos,"Settings never reached a captured frame");
                 const wchar_t* ratios[]={L"1.50x",L"2.00x",L"3.00x"};
                 Require(status.find(std::wstring(L"Scale: ")+(mode==0?L"1.00x":ratios[output-1]))!=std::wstring::npos,"Wrong upscale ratio");
             }
@@ -257,7 +339,9 @@ int wmain(int argc, wchar_t** argv) {
         SendMessageW(app.main, WM_CLOSE, 0, 0);
         Require(WaitForSingleObject(process.hProcess, 5000) == WAIT_OBJECT_0, "App failed to exit");
         DWORD exitCode{}; GetExitCodeProcess(process.hProcess, &exitCode); Require(exitCode == 0, "App exited with error");
-        CloseHandle(process.hThread); CloseHandle(process.hProcess); DestroyWindow(source);
+        CloseHandle(process.hThread); CloseHandle(process.hProcess);
+        if(chromeGuide) { PostMessageW(source,WM_CLOSE,0,0); Pump(500); CloseHandle(chromeProcess.hThread); CloseHandle(chromeProcess.hProcess); }
+        else DestroyWindow(source);
         std::cout << "PASS: source selection, capture status, preview, fullscreen, Escape, topmost, stop/restart, close.\n";
         return 0;
     } catch (std::exception const& e) {
@@ -270,7 +354,8 @@ int wmain(int argc, wchar_t** argv) {
             if(WaitForSingleObject(process.hProcess,1000)!=WAIT_OBJECT_0) TerminateProcess(process.hProcess,1);
             CloseHandle(process.hThread); CloseHandle(process.hProcess);
         }
-        if (source) DestroyWindow(source);
+        if(source) { if(chromeGuide) PostMessageW(source,WM_CLOSE,0,0); else DestroyWindow(source); }
+        if(chromeProcess.hProcess) { CloseHandle(chromeProcess.hThread); CloseHandle(chromeProcess.hProcess); }
         return 1;
     }
 }

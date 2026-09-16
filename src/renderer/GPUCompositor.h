@@ -1,5 +1,6 @@
 #pragma once
 #include "GPUUpscaler.h"
+#include "InputGuide.h"
 struct DisplayRect { float x{}, y{}, width{}, height{}; };
 class GPUCompositor {
 public:
@@ -7,7 +8,7 @@ public:
     void Draw(ID3D11RenderTargetView* target, UINT width, UINT height,
         ID3D11ShaderResourceView* processed, SourceRegion processedRegion,
         ID3D11ShaderResourceView* source, SourceRegion crop, UpscaleSize canvas, UpscaleSize content,
-        CompareMode compare, float split, bool edit);
+        CompareMode compare, float split, bool edit, InputGuide guide={});
     DisplayRect ContentRect() const { return contentRect_; }
 private:
     winrt::com_ptr<ID3D11DeviceContext> context_;

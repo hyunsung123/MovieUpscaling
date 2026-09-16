@@ -25,6 +25,10 @@ public:
     SourceRegion CroppedRegion() const { return cropRegion_; }
     void SetCropEdit(bool enabled) { cropEdit_=enabled; }
     bool CropEdit() const { return cropEdit_; }
+    void SetInputGuide(InputGuide guide) { guide_=guide; }
+    InputGuide Guide() const { return guide_; }
+    UpscaleSize MonitorSize() const;
+    bool FitInput720p(bool preset=false);
     void SetCompare(CompareMode mode) { compare_=mode; }
     CompareMode Compare() const { return compare_; }
     void SetSplit(float position) { split_=std::clamp(position,0.f,1.f); }
@@ -61,6 +65,7 @@ private:
     GPUCompositor compositor_;
     GPUTimer timer_;
     CropSettings crop_{},appliedCrop_{};
+    InputGuide guide_{};
     SourceRegion cropRegion_{};
     int sharpen_{25},appliedSharpen_{};
     bool cropEdit_{},appliedEdit_{};

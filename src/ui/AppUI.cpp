@@ -9,6 +9,7 @@ namespace {
 constexpr int Source = 100, RefreshList = 101, StartCapture = 102, StopCapture = 103, ToggleFullscreen = 104, Topmost = 105;
 constexpr int Upscale = 106, Output = 107;
 constexpr int Sharpen=108, CropMode=109, EditCrop=110, Compare=111, Split=112, CropLeft=113;
+constexpr int Guide=117,GuideWidth=118,GuideHeight=119,Fit720=120,AspectLock=121,Preset720=122;
 HWND Control(HWND parent, const wchar_t* cls, const wchar_t* text, DWORD style, int x, int y, int w, int h, int id) {
     HWND hwnd = CreateWindowExW(0, cls, text, WS_CHILD | WS_VISIBLE | style, x, y, w, h, parent,
         reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), GetModuleHandleW(nullptr), nullptr);
@@ -29,7 +30,7 @@ int AppUI::Run(HINSTANCE instance, int show) {
     if (!RegisterClassExW(&cls)) throw_last_error();
     main_ = CreateWindowExW(0, cls.lpszClassName, L"Window GPU Preview - GPU Upscaling",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, CW_USEDEFAULT, CW_USEDEFAULT,
-        740, 870, nullptr, nullptr, instance, this);
+        1030, 870, nullptr, nullptr, instance, this);
     if (!main_) throw_last_error();
     preview_ = CreateWindowExW(0, cls.lpszClassName, L"GPU Preview - double click: fullscreen / Esc: windowed",
         WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 960, 600, nullptr, nullptr, instance, this);
@@ -74,6 +75,20 @@ int AppUI::Run(HINSTANCE instance, int show) {
     SendMessageW(splitSlider_,TBM_SETRANGE,TRUE,MAKELPARAM(0,100));
     splitValue_=Control(main_,L"STATIC",L"50%",0,610,365,70,22,0);
     status_ = Control(main_, L"STATIC", L"", 0, 20, 410, 695, 400, 0);
+    Control(main_,L"STATIC",L"Input Guide (Crop Edit only)",0,725,20,280,22,0);
+    inputGuide_=Control(main_,L"COMBOBOX",L"",CBS_DROPDOWNLIST|WS_TABSTOP,725,48,275,180,Guide);
+    for(auto label:{L"Off",L"1280 x 720",L"1920 x 1080",L"Custom"}) SendMessageW(inputGuide_,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(label));
+    customLabel_=Control(main_,L"STATIC",L"Custom width / height (1-16384)",0,725,86,280,22,0);
+    guideWidth_=Control(main_,L"EDIT",L"1280",WS_BORDER|ES_NUMBER|WS_TABSTOP,725,112,130,26,GuideWidth);
+    guideHeight_=Control(main_,L"EDIT",L"720",WS_BORDER|ES_NUMBER|WS_TABSTOP,870,112,130,26,GuideHeight);
+    SendMessageW(guideWidth_,EM_SETLIMITTEXT,5,0); SendMessageW(guideHeight_,EM_SETLIMITTEXT,5,0);
+    fit720_=Control(main_,L"BUTTON",L"Fit 720p",WS_TABSTOP,725,152,275,32,Fit720);
+    Control(main_,L"STATIC",L"Aspect Lock",0,725,202,110,22,0);
+    aspectLock_=Control(main_,L"COMBOBOX",L"",CBS_DROPDOWNLIST|WS_TABSTOP,840,198,160,120,AspectLock);
+    for(auto label:{L"Off",L"16:9"}) SendMessageW(aspectLock_,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(label));
+    preset720_=Control(main_,L"BUTTON",L"720p -> 1440p",WS_TABSTOP,725,240,275,32,Preset720);
+    Control(main_,L"STATIC",L"This is the captured pixel size, not the streaming service's encoded resolution.",0,725,292,275,48,0);
+    guideStatus_=Control(main_,L"STATIC",L"Start capture to use Fit / preset.",0,725,355,280,440,0);
     SyncVideoControls();
     wchar_t debug[8]{};
     renderer_.Initialize(preview_,GetEnvironmentVariableW(L"MOVIEUPSCALING_DEBUG_D3D",debug,8)>0);
@@ -125,13 +140,34 @@ LRESULT AppUI::Handle(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
     }
     if (hwnd == main_) {
         switch (message) {
-        case WM_HSCROLL: UpdateVideoSettings(); return 0;
+        case WM_HSCROLL: UpdateVideoSettings(GetDlgCtrlID(reinterpret_cast<HWND>(l))); return 0;
         case WM_COMMAND:
             switch (LOWORD(w)) {
+            case Guide: if(HIWORD(w)==CBN_SELCHANGE) ChangeGuide(); break;
+            case GuideWidth: case GuideHeight:
+                if(HIWORD(w)==EN_KILLFOCUS) ChangeGuide(); break;
+            case Fit720: case Preset720:
+                if(capture_.Running() && renderer_.FitInput720p(LOWORD(w)==Preset720)) {
+                    fitted720_=true;
+                    if(LOWORD(w)==Preset720) {
+                        lastSharpen_=25; SendMessageW(output_,CB_SETCURSEL,2,0);
+                        SendMessageW(upscale_,CB_SETCURSEL,static_cast<WPARAM>(UpscaleMode::Easu),0);
+                    }
+                    SyncVideoControls(); RedrawSettings();
+                }
+                break;
+            case AspectLock:
+                if(HIWORD(w)==CBN_SELCHANGE) {
+                    auto crop=renderer_.Crop(); crop.aspect16x9=SendMessageW(aspectLock_,CB_GETCURSEL,0,0)==1;
+                    if(crop.manual && crop.aspect16x9 && inputWidth_>0 && inputHeight_>0)
+                        crop=PixelCrop(FitAspect16x9(CropRegion(inputWidth_,inputHeight_,crop)),true);
+                    renderer_.SetCrop(crop); SyncVideoControls(); RedrawSettings();
+                }
+                break;
             case CropMode:
                 if(HIWORD(w)==CBN_SELCHANGE) {
                     auto crop=renderer_.Crop(); crop.manual=SendMessageW(cropMode_,CB_GETCURSEL,0,0)==1;
-                    renderer_.SetCrop(crop); if(!crop.manual) renderer_.SetCropEdit(false); SyncVideoControls();
+                    renderer_.SetCrop(crop); if(!crop.manual) renderer_.SetCropEdit(false); SyncVideoControls(); RedrawSettings();
                 }
                 break;
             case EditCrop: Hotkey(VK_F2); break;
@@ -231,6 +267,8 @@ void AppUI::Start() {
     renderer_.Clear();
     captured_ = rendered_ = skipped_ = 0;
     inputWidth_ = inputHeight_ = 0;
+    fitted720_=false;
+    SyncVideoControls();
     captureFps_ = renderFps_ = submitMs_ = 0;
     statsTime_ = std::chrono::steady_clock::now();
     capture_.Start(entry.hwnd, renderer_.Device(), main_);
@@ -241,6 +279,8 @@ void AppUI::Stop(const wchar_t* reason) {
     capture_.Stop();
     EnableWindow(start_, TRUE); EnableWindow(stop_, FALSE);
     renderer_.Clear();
+    SyncVideoControls();
+    GuideStatus();
     auto text = std::wstring(reason) + L"\r\nGPU: " + renderer_.AdapterName() +
         L"\r\nUpscaler: " + UpscaleName(renderer_.Mode()) +
         L"\r\nSettings apply on the next capture frame. F1: compare / F2: crop edit / F3: RCAS.";
@@ -251,6 +291,7 @@ void AppUI::OnFrame() {
     if (!frame) return;
     ++captured_;
     auto size = frame.ContentSize();
+    const bool sizeChanged=inputWidth_!=size.Width || inputHeight_!=size.Height;
     inputWidth_ = size.Width; inputHeight_ = size.Height;
     if (size.Width > 0 && size.Height > 0) {
         auto access = frame.Surface().as<::Windows::Graphics::DirectX::Direct3D11::IDirect3DDxgiInterfaceAccess>();
@@ -262,6 +303,7 @@ void AppUI::OnFrame() {
     }
     frame.Close();
     capture_.Resize(size); // Release outstanding frame before pool recreation.
+    if(sizeChanged) { SyncVideoControls(); GuideStatus(); }
 }
 void AppUI::Status(bool sampleCounters) {
     auto now = std::chrono::steady_clock::now();
@@ -311,13 +353,21 @@ void AppUI::Status(bool sampleCounters) {
         << L"Capture generation: " << capture_.Generation() << L"\r\n"
         << L"SDR. Black/frozen image: check protection or minimized source.";
     SetWindowTextW(status_, text.str().c_str());
+    GuideStatus();
 }
 void AppUI::SyncVideoControls() {
     SendMessageW(sharpenSlider_,TBM_SETPOS,TRUE,renderer_.Sharpen());
     SetWindowTextW(sharpenValue_,std::to_wstring(renderer_.Sharpen()).c_str());
     auto crop=renderer_.Crop(); SendMessageW(cropMode_,CB_SETCURSEL,crop.manual?1:0,0);
-    const int values[]={crop.left,crop.top,crop.right,crop.bottom}; const wchar_t* names[]={L"Left",L"Top",L"Right",L"Bottom"};
+    int values[]={crop.left,crop.top,crop.right,crop.bottom}; const wchar_t* names[]={L"Left",L"Top",L"Right",L"Bottom"};
+    if((crop.pixelCrop || crop.aspect16x9) && inputWidth_>0 && inputHeight_>0) {
+        auto r=CropRegion(inputWidth_,inputHeight_,crop);
+        values[0]=int(std::lround(r.x*100.0/inputWidth_)); values[1]=int(std::lround(r.y*100.0/inputHeight_));
+        values[2]=int(std::lround((inputWidth_-r.x-r.width)*100.0/inputWidth_));
+        values[3]=int(std::lround((inputHeight_-r.y-r.height)*100.0/inputHeight_));
+    }
     for(int i=0;i<4;++i) {
+        SendMessageW(cropSliders_[i],TBM_SETRANGE,TRUE,MAKELPARAM(0,(crop.pixelCrop || crop.aspect16x9)?99:45));
         SendMessageW(cropSliders_[i],TBM_SETPOS,TRUE,values[i]);
         SetWindowTextW(cropLabels_[i],(std::wstring(names[i])+L": "+std::to_wstring(values[i])+L"%").c_str());
         ShowWindow(cropSliders_[i],crop.manual?SW_SHOW:SW_HIDE); ShowWindow(cropLabels_[i],crop.manual?SW_SHOW:SW_HIDE);
@@ -326,19 +376,70 @@ void AppUI::SyncVideoControls() {
     SendMessageW(compareMode_,CB_SETCURSEL,static_cast<WPARAM>(renderer_.Compare()),0);
     SendMessageW(splitSlider_,TBM_SETPOS,TRUE,int(std::lround(renderer_.Split()*100)));
     SetWindowTextW(splitValue_,(std::to_wstring(int(std::lround(renderer_.Split()*100)))+L"%").c_str());
+    auto guide=renderer_.Guide(); SendMessageW(inputGuide_,CB_SETCURSEL,static_cast<WPARAM>(guide.mode),0);
+    SendMessageW(aspectLock_,CB_SETCURSEL,crop.aspect16x9?1:0,0);
+    for(auto control:{guideWidth_,guideHeight_,customLabel_}) ShowWindow(control,guide.mode==GuideMode::Custom?SW_SHOW:SW_HIDE);
+    const bool ready=capture_.Running() && inputWidth_>0 && inputHeight_>0;
+    EnableWindow(fit720_,ready); EnableWindow(preset720_,ready);
 }
-void AppUI::UpdateVideoSettings() {
+void AppUI::ChangeGuide() {
+    auto guide=renderer_.Guide();
+    auto index=SendMessageW(inputGuide_,CB_GETCURSEL,0,0);
+    if(index<0 || index>3) return;
+    guide.mode=static_cast<GuideMode>(index);
+    if(guide.mode==GuideMode::Custom) {
+        BOOL validW{},validH{};
+        const UINT w=GetDlgItemInt(main_,GuideWidth,&validW,FALSE),h=GetDlgItemInt(main_,GuideHeight,&validH,FALSE);
+        if(validW && validH && w>=1 && h>=1 && w<=16384 && h<=16384) {
+            guide.customWidth=w; guide.customHeight=h;
+        } else {
+            SetWindowTextW(guideWidth_,std::to_wstring(guide.customWidth).c_str());
+            SetWindowTextW(guideHeight_,std::to_wstring(guide.customHeight).c_str());
+        }
+    }
+    renderer_.SetInputGuide(guide); SyncVideoControls();
+    if(renderer_.CropEdit()) RedrawSettings(); else GuideStatus();
+}
+void AppUI::GuideStatus() {
+    if(!capture_.Running() || inputWidth_<=0 || inputHeight_<=0) {
+        SetWindowTextW(guideStatus_,L"Start capture to use Fit / preset."); return;
+    }
+    auto crop=renderer_.CroppedRegion(); auto guide=renderer_.Guide(); auto target=guide.Target();
+    std::wostringstream text;
+    text<<L"Captured Window: "<<inputWidth_<<L" x "<<inputHeight_
+        <<L"\r\nCurrent Crop: "<<crop.width<<L" x "<<crop.height
+        <<L"\r\nProcessing input: "<<ProcessingInput(crop);
+    if(target.width) {
+        text<<L"\r\n\r\nTarget Guide: "<<target.width<<L" x "<<target.height
+            <<L"\r\nDifference: "<<std::showpos<<int(crop.width)-int(target.width)<<L" x "<<int(crop.height)-int(target.height)<<std::noshowpos
+            <<L"\r\n"<<(guide.mode==GuideMode::HD720?L"720p":guide.mode==GuideMode::HD1080?L"1080p":L"Custom")
+            <<L" target: "<<MatchName(MatchTarget(crop,target));
+        if(target.width>UINT(inputWidth_) || target.height>UINT(inputHeight_)) text<<L"\r\nTarget exceeds captured frame.";
+    } else text<<L"\r\n\r\nTarget Guide: Off";
+    if((fitted720_ || guide.mode==GuideMode::HD720) && (inputWidth_<1280 || inputHeight_<720))
+        text<<L"\r\nSource smaller than 720p target";
+    auto monitor=renderer_.MonitorSize(); auto recommendation=RecommendedOutput(crop,monitor.width,monitor.height);
+    if(recommendation.width) text<<L"\r\n\r\nRecommended Output: "<<recommendation.width<<L" x "<<recommendation.height;
+    if(renderer_.CropEdit()) text<<L"\r\n\r\nSolid cyan: current crop\r\nDashed amber: target guide";
+    else text<<L"\r\n\r\nPress Edit Crop to show guides.";
+    SetWindowTextW(guideStatus_,text.str().c_str());
+}
+void AppUI::UpdateVideoSettings(int controlId) {
     const auto previousSharpen=renderer_.Sharpen();
     renderer_.SetSharpen(static_cast<int>(SendMessageW(sharpenSlider_,TBM_GETPOS,0,0)));
     if(renderer_.Sharpen()>0) lastSharpen_=renderer_.Sharpen();
     auto crop=renderer_.Crop();
-    crop.left=static_cast<int>(SendMessageW(cropSliders_[0],TBM_GETPOS,0,0)); crop.top=static_cast<int>(SendMessageW(cropSliders_[1],TBM_GETPOS,0,0));
-    crop.right=static_cast<int>(SendMessageW(cropSliders_[2],TBM_GETPOS,0,0)); crop.bottom=static_cast<int>(SendMessageW(cropSliders_[3],TBM_GETPOS,0,0));
+    auto previousCrop=crop;
+    if(!crop.pixelCrop && !crop.aspect16x9) {
+        crop.left=static_cast<int>(SendMessageW(cropSliders_[0],TBM_GETPOS,0,0)); crop.top=static_cast<int>(SendMessageW(cropSliders_[1],TBM_GETPOS,0,0));
+        crop.right=static_cast<int>(SendMessageW(cropSliders_[2],TBM_GETPOS,0,0)); crop.bottom=static_cast<int>(SendMessageW(cropSliders_[3],TBM_GETPOS,0,0));
+    } else if(controlId>=CropLeft && controlId<CropLeft+4)
+        crop=AdjustCropEdge(inputWidth_,inputHeight_,crop,controlId-CropLeft,int(SendMessageW(cropSliders_[controlId-CropLeft],TBM_GETPOS,0,0)));
     renderer_.SetCrop(crop); renderer_.SetSplit(float(SendMessageW(splitSlider_,TBM_GETPOS,0,0))/100);
     SyncVideoControls();
-    if(previousSharpen!=renderer_.Sharpen()) RedrawSharpen();
+    if(previousSharpen!=renderer_.Sharpen() || previousCrop!=crop) RedrawSettings();
 }
-void AppUI::RedrawSharpen() {
+void AppUI::RedrawSettings() {
     if(!capture_.Running()) return;
     auto begin=std::chrono::steady_clock::now();
     if(renderer_.Redraw()) ++rendered_;
@@ -354,7 +455,7 @@ bool AppUI::Hotkey(WPARAM key) {
         else renderer_.SetSharpen(lastSharpen_);
     } else return false;
     SyncVideoControls();
-    if(key==VK_F3) RedrawSharpen();
+    if(key==VK_F3 || key==VK_F2) RedrawSettings();
     return true;
 }
 void AppUI::Fullscreen() {

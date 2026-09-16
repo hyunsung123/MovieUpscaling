@@ -36,11 +36,25 @@ UpscaleSize D3DRenderer::OutputSize() const {
     case OutputMode::FullHD: return {1920, 1080};
     case OutputMode::QHD: return {2560, 1440};
     case OutputMode::UHD: return {3840, 2160};
-    default:
-        MONITORINFO info{sizeof(info)};
-        check_bool(GetMonitorInfoW(MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST), &info));
-        return {static_cast<UINT>(info.rcMonitor.right - info.rcMonitor.left), static_cast<UINT>(info.rcMonitor.bottom - info.rcMonitor.top)};
+    default: return MonitorSize();
     }
+}
+UpscaleSize D3DRenderer::MonitorSize() const {
+    MONITORINFO info{sizeof(info)};
+    check_bool(GetMonitorInfoW(MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST), &info));
+    return {static_cast<UINT>(info.rcMonitor.right - info.rcMonitor.left), static_cast<UINT>(info.rcMonitor.bottom - info.rcMonitor.top)};
+}
+bool D3DRenderer::FitInput720p(bool preset) {
+    if(!hasFrame_) return false;
+    auto region=CropRegion(inputWidth_,inputHeight_,crop_);
+    // Preserve an already-good crop exactly, including an asymmetric position.
+    if(!preset || MatchTarget(region,{0,0,1280,720})!=TargetMatch::Good) region=Fit720p(inputWidth_,inputHeight_);
+    crop_=PixelCrop(region,preset || crop_.aspect16x9);
+    if(preset) {
+        guide_.mode=GuideMode::HD720; outputMode_=OutputMode::QHD;
+        mode_=UpscaleMode::Easu; sharpen_=25;
+    }
+    return true;
 }
 bool D3DRenderer::Resize() {
     RECT rect{};
@@ -118,5 +132,5 @@ void D3DRenderer::DrawFrame() {
     }
     appliedMode_ = mode_; appliedOutput_ = output;
     appliedCrop_=crop_; appliedSharpen_=sharpen_; appliedEdit_=cropEdit_;
-    compositor_.Draw(target_.get(),width_,height_,view,region,inputView_.get(),cropRegion_,output,contentSize_,compare_,split_,cropEdit_);
+    compositor_.Draw(target_.get(),width_,height_,view,region,inputView_.get(),cropRegion_,output,contentSize_,compare_,split_,cropEdit_,guide_);
 }
